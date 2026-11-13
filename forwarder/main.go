@@ -30,7 +30,8 @@ const (
 	arphrdEther   = 1
 	arphrdNone    = 0xfffe
 	maxBatchItems = 32
-	maxFrameBytes = 64 * 1024
+	maxBatchBytes = 48 * 1024
+	maxFrameBytes = 512 * 1024
 	flushInterval = 20 * time.Millisecond
 )
 
@@ -443,12 +444,14 @@ func (f *Forwarder) pumpSession(ctx context.Context, ws *simpleWS) error {
 	defer ticker.Stop()
 
 	batch := make([]chunk, 0, maxBatchItems)
+	batchBytes := 16
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
 		payload, err := json.Marshal(batchPayload{Chunks: batch})
 		batch = batch[:0]
+		batchBytes = 16
 		if err != nil {
 			return err
 		}
@@ -460,7 +463,14 @@ func (f *Forwarder) pumpSession(ctx context.Context, ws *simpleWS) error {
 		case <-ctx.Done():
 			return flush()
 		case c := <-f.chunkChan:
+			cBytes := len(c.Flow) + len(c.Data) + 64
+			if len(batch) > 0 && batchBytes+cBytes > maxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
 			batch = append(batch, c)
+			batchBytes += cBytes
 			if len(batch) >= maxBatchItems {
 				if err := flush(); err != nil {
 					return err
