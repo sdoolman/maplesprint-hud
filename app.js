@@ -11,6 +11,7 @@
  *   sessionExp: number,
  *   kills: number,
  *   mesos: number,
+ *   drops: number,
  *   hp: number | null,
  *   mp: number | null,
  *   mapId: number | null,
@@ -75,7 +76,7 @@ function getCatalogBase() {
 /** @type {CatalogDB} */
 const db = { maps: {}, mobs: {}, items: {} };
 /** @type {HudState} */
-const state = { startTs: null, sessionExp: 0, kills: 0, mesos: 0, hp: null, mp: null, mapId: null, ch: null };
+const state = { startTs: null, sessionExp: 0, kills: 0, mesos: 0, drops: 0, hp: null, mp: null, mapId: null, ch: null };
 
 /** @type {WebSocket | null} */
 let ws = null;
@@ -95,6 +96,9 @@ async function loadCatalog() {
     if (!mapsR.ok || !mobsR.ok || !itemsR.ok) {
       throw new Error("Catalog HTTP error");
     }
+    db.maps = {};
+    db.mobs = {};
+    db.items = {};
     const mapsD = await mapsR.json();
     for (const reg of mapsD.regions || []) {
       for (const m of reg.maps || []) {
@@ -109,7 +113,7 @@ async function loadCatalog() {
     for (const it of itemsD.items || []) {
       db.items[it.id] = { name: it.name, cat: it.category || "", price: it.stats?.price ?? null };
     }
-    requireEl("dbStatus").textContent = `${Object.keys(db.mobs).length} mobs`;
+    requireEl("dbStatus").textContent = `${Object.keys(db.maps).length} maps · ${Object.keys(db.mobs).length} mobs · ${Object.keys(db.items).length} items`;
   } catch {
     requireEl("dbStatus").textContent = "DB error";
   }
@@ -139,6 +143,7 @@ function render() {
   requireEl("hp").textContent = state.hp !== null ? String(state.hp) : "--";
   requireEl("mp").textContent = state.mp !== null ? String(state.mp) : "--";
   requireEl("mesos").textContent = state.mesos.toLocaleString();
+  requireEl("drops").textContent = state.drops.toLocaleString();
   if (state.mapId !== null) {
     const m = db.maps[state.mapId];
     mapLine.textContent = `${m ? `${m.name} (${m.street})` : `Map #${state.mapId}`} • Ch. ${state.ch ?? "?"}`;
@@ -172,6 +177,7 @@ function handleEvent(ev) {
       break;
     }
     case "item_loot": {
+      state.drops += ev.qty || 1;
       const it = db.items[ev.item_id];
       addFeed(`Loot: ${it ? it.name : `Item #${ev.item_id}`} x${ev.qty}`);
       break;
@@ -302,6 +308,7 @@ function resetLocalState() {
   state.sessionExp = 0;
   state.kills = 0;
   state.mesos = 0;
+  state.drops = 0;
   state.hp = null;
   state.mp = null;
   state.mapId = null;

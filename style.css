@@ -33,6 +33,9 @@ h1 { font-size: 1.2rem; }
 .hidden { display: none; }
 .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 @media (min-width: 540px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+.label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.label-row .label { margin-bottom: 0; }
+.muted.small { font-size: 0.75rem; margin-top: 0; }
 .label { font-size: 0.7rem; color: var(--muted); letter-spacing: 0.06em; margin-bottom: 4px; }
 .val { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .val.small { font-size: 0.85rem; }

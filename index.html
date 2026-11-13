@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261113b" />
+  <link rel="stylesheet" href="style.css?v=20261113c" />
 </head>
 <body>
   <main class="wrap">
@@ -31,7 +31,10 @@
       </div>
 
       <div class="config-group divider">
-        <div class="label">GAME DATA SOURCE (CATALOG)</div>
+        <div class="label-row">
+          <div class="label">GAME DATA SOURCE (CATALOG)</div>
+          <span id="dbStatus" class="muted small">Loading...</span>
+        </div>
         <select id="dbSource">
           <option value="https://osmsdataexplorer.com/data/current/">OSMS Data Explorer (osmsdataexplorer.com)</option>
           <option value="custom">Custom Catalog URL...</option>
@@ -48,7 +51,7 @@
       <div class="card"><div class="label">HP</div><div id="hp" class="val hp">--</div></div>
       <div class="card"><div class="label">MP</div><div id="mp" class="val mp">--</div></div>
       <div class="card"><div class="label">MESOS</div><div id="mesos" class="val gold">0</div></div>
-      <div class="card"><div class="label">CATALOG</div><div id="dbStatus" class="val small">Loading...</div></div>
+      <div class="card"><div class="label">DROPS</div><div id="drops" class="val accent">0</div></div>
     </section>
 
     <section class="card">
@@ -56,6 +59,6 @@
       <ul id="feed" class="feed"></ul>
     </section>
   </main>
-  <script src="app.js?v=20261113b"></script>
+  <script src="app.js?v=20261113c"></script>
 </body>
 </html>
