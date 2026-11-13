@@ -17,13 +17,26 @@
     </header>
 
     <section class="card config">
-      <input id="workerUrl" type="url" placeholder="Worker URL (e.g. https://maplesprint-hub.example.workers.dev)" />
-      <input id="roomId" type="text" placeholder="Room ID (e.g. my-room)" />
-      <input id="dbBase" type="url" placeholder="Catalog URL (default: OSMS Data Explorer)" />
-      <div class="actions">
-        <button id="connectBtn">Connect</button>
-        <button id="shareBtn" class="btn-sec" type="button">Share</button>
-        <button id="resetBtn" class="btn-sec" type="button">Reset</button>
+      <div class="config-group">
+        <div class="label">TELEMETRY ROOM (WORKER)</div>
+        <div class="row-worker">
+          <input id="workerUrl" type="url" placeholder="Worker URL (e.g. https://maplesprint-hub.example.workers.dev)" />
+          <input id="roomId" type="text" placeholder="Room ID (e.g. my-room)" />
+        </div>
+        <div class="actions">
+          <button id="connectBtn" type="button">Connect Room</button>
+          <button id="shareBtn" class="btn-sec" type="button">Share Link</button>
+          <button id="resetBtn" class="btn-sec" type="button">Reset Room</button>
+        </div>
+      </div>
+
+      <div class="config-group divider">
+        <div class="label">GAME DATA SOURCE (CATALOG)</div>
+        <select id="dbSource">
+          <option value="https://osmsdataexplorer.com/data/current/">OSMS Data Explorer (osmsdataexplorer.com)</option>
+          <option value="custom">Custom Catalog URL...</option>
+        </select>
+        <input id="dbBase" class="hidden" type="url" placeholder="Custom catalog base URL (must serve maps.json, monsters.json, items.json)" />
       </div>
     </section>
 

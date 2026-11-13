@@ -42,6 +42,7 @@ function requireEl(id) {
 
 const workerInput = /** @type {HTMLInputElement} */ (requireEl("workerUrl"));
 const roomInput = /** @type {HTMLInputElement} */ (requireEl("roomId"));
+const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
 const dbInput = /** @type {HTMLInputElement} */ (requireEl("dbBase"));
 const statusDot = requireEl("statusDot");
 const mapLine = requireEl("mapLine");
@@ -50,7 +51,23 @@ const feedEl = requireEl("feed");
 const params = new URLSearchParams(window.location.search);
 workerInput.value = params.get("worker") || localStorage.getItem("ms_worker") || "";
 roomInput.value = params.get("room") || localStorage.getItem("ms_room") || "";
-dbInput.value = localStorage.getItem("ms_db") || DEFAULT_DB;
+
+const savedDb = localStorage.getItem("ms_db") || DEFAULT_DB;
+const hasPreset = Array.from(dbSourceSelect.options).some((opt) => opt.value === savedDb && opt.value !== "custom");
+if (hasPreset) {
+  dbSourceSelect.value = savedDb;
+  dbInput.value = savedDb;
+} else {
+  dbSourceSelect.value = "custom";
+  dbInput.value = savedDb;
+  dbInput.classList.remove("hidden");
+}
+
+/** @returns {string} */
+function getCatalogBase() {
+  const raw = dbSourceSelect.value === "custom" ? dbInput.value.trim() : dbSourceSelect.value;
+  return (raw || DEFAULT_DB).replace(/\/+$/, "") + "/";
+}
 
 /** @type {CatalogDB} */
 const db = { maps: {}, mobs: {}, items: {} };
@@ -64,7 +81,7 @@ let reconnectTimer = null;
 let reconnectDelayMs = 1500;
 
 async function loadCatalog() {
-  const base = (dbInput.value.trim() || DEFAULT_DB).replace(/\/+$/, "") + "/";
+  const base = getCatalogBase();
   requireEl("dbStatus").textContent = "Loading...";
   try {
     const [mapsR, mobsR, itemsR] = await Promise.all([
@@ -192,7 +209,7 @@ function connect() {
   }
   localStorage.setItem("ms_worker", base);
   localStorage.setItem("ms_room", room);
-  localStorage.setItem("ms_db", dbInput.value.trim() || DEFAULT_DB);
+  localStorage.setItem("ms_db", getCatalogBase());
 
   if (ws) ws.close();
   const wsUrl = base.replace(/^http/, "ws") + `/room/${encodeURIComponent(room)}?role=hud`;
@@ -233,8 +250,27 @@ function connect() {
   };
 }
 
-requireEl("connectBtn").addEventListener("click", () => {
+dbSourceSelect.addEventListener("change", () => {
+  if (dbSourceSelect.value === "custom") {
+    dbInput.classList.remove("hidden");
+    dbInput.focus();
+    return;
+  }
+  dbInput.classList.add("hidden");
+  dbInput.value = dbSourceSelect.value;
+  localStorage.setItem("ms_db", getCatalogBase());
   loadCatalog();
+});
+
+dbInput.addEventListener("change", () => {
+  if (dbSourceSelect.value === "custom" && dbInput.value.trim()) {
+    localStorage.setItem("ms_db", getCatalogBase());
+    loadCatalog();
+  }
+});
+
+requireEl("connectBtn").addEventListener("click", () => {
+  if (Object.keys(db.mobs).length === 0) loadCatalog();
   connect();
 });
 
@@ -250,7 +286,7 @@ requireEl("shareBtn").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(shareUrl);
     btn.textContent = "Copied!";
-    window.setTimeout(() => { btn.textContent = "Share"; }, 1500);
+    window.setTimeout(() => { btn.textContent = "Share Link"; }, 1500);
   } catch {
     window.prompt("Copy HUD share link:", shareUrl);
   }
