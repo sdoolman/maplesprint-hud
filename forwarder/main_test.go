@@ -68,26 +68,31 @@ func TestResolveCaptureRange(t *testing.T) {
 	defer srv.Close()
 
 	// Default (no key) -> generic 0-65535
-	min, max := resolveCaptureRange(srv.URL, "", false, -1, -1)
-	if min != 0 || max != 65535 {
-		t.Fatalf("expected generic 0-65535, got %d-%d", min, max)
+	min, max, err := resolveCaptureRange(srv.URL, "", false, -1, -1)
+	if err != nil || min != 0 || max != 65535 {
+		t.Fatalf("expected generic 0-65535, got %d-%d (err=%v)", min, max, err)
 	}
 
 	// Authenticated (valid key) -> fetched 4000-4099
-	min, max = resolveCaptureRange(srv.URL, "secret-key", false, -1, -1)
-	if min != 4000 || max != 4099 {
-		t.Fatalf("expected authenticated 4000-4099, got %d-%d", min, max)
+	min, max, err = resolveCaptureRange(srv.URL, "secret-key", false, -1, -1)
+	if err != nil || min != 4000 || max != 4099 {
+		t.Fatalf("expected authenticated 4000-4099, got %d-%d (err=%v)", min, max, err)
 	}
 
 	// --generic overrides key
-	min, max = resolveCaptureRange(srv.URL, "secret-key", true, -1, -1)
-	if min != 0 || max != 65535 {
-		t.Fatalf("expected --generic 0-65535, got %d-%d", min, max)
+	min, max, err = resolveCaptureRange(srv.URL, "secret-key", true, -1, -1)
+	if err != nil || min != 0 || max != 65535 {
+		t.Fatalf("expected --generic 0-65535, got %d-%d (err=%v)", min, max, err)
 	}
 
 	// Explicit flags override everything
-	min, max = resolveCaptureRange(srv.URL, "secret-key", false, 9000, 9010)
-	if min != 9000 || max != 9010 {
-		t.Fatalf("expected explicit 9000-9010, got %d-%d", min, max)
+	min, max, err = resolveCaptureRange(srv.URL, "secret-key", false, 9000, 9010)
+	if err != nil || min != 9000 || max != 9010 {
+		t.Fatalf("expected explicit 9000-9010, got %d-%d (err=%v)", min, max, err)
+	}
+
+	// Invalid port range fails closed
+	if _, _, err := resolveCaptureRange(srv.URL, "", false, 5000, 4000); err == nil {
+		t.Fatal("expected error for inverted port range")
 	}
 }

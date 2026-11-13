@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ const (
 	arphrdEther   = 1
 	arphrdNone    = 0xfffe
 	maxBatchItems = 32
+	maxFrameBytes = 64 * 1024
 	flushInterval = 20 * time.Millisecond
 )
 
@@ -46,15 +49,77 @@ type batchPayload struct {
 	Chunks []chunk `json:"chunks"`
 }
 
+// PacketSource abstracts raw packet capture for testability and clean lifecycle management.
+type PacketSource interface {
+	ReadPacket(buf []byte) ([]byte, uint16, error)
+	Close() error
+}
+
+type RawSocketSource struct {
+	fd int
+}
+
+func OpenRawSocketSource(ifaceName string) (*RawSocketSource, error) {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("interface %s: %w", ifaceName, err)
+	}
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPAll)))
+	if err != nil {
+		return nil, fmt.Errorf("AF_PACKET socket (run as root or CAP_NET_RAW): %w", err)
+	}
+	sll := &syscall.SockaddrLinklayer{
+		Protocol: htons(ethPAll),
+		Ifindex:  iface.Index,
+	}
+	if err := syscall.Bind(fd, sll); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("bind %s: %w", ifaceName, err)
+	}
+	return &RawSocketSource{fd: fd}, nil
+}
+
+func (s *RawSocketSource) ReadPacket(buf []byte) ([]byte, uint16, error) {
+	for {
+		n, sa, err := syscall.Recvfrom(s.fd, buf, 0)
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return nil, 0, err
+		}
+		var hatype uint16 = arphrdNone
+		if sll, ok := sa.(*syscall.SockaddrLinklayer); ok {
+			hatype = sll.Hatype
+		}
+		return buf[:n], hatype, nil
+	}
+}
+
+func (s *RawSocketSource) Close() error {
+	return syscall.Close(s.fd)
+}
+
 func htons(v uint16) uint16 {
 	return (v<<8)&0xff00 | (v>>8)&0x00ff
 }
 
+func validateWorkerURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("invalid --worker URL %q (expected http:// or https://)", raw)
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
 // resolveCaptureRange picks port bounds from flags or GET /config when a key is set,
 // defaulting to generic (0-65535) when unauthenticated or in --generic mode.
-func resolveCaptureRange(workerURL, ingestKey string, generic bool, flagMin, flagMax int) (int, int) {
-	if flagMin >= 0 && flagMax >= flagMin {
-		return flagMin, flagMax
+func resolveCaptureRange(workerURL, ingestKey string, generic bool, flagMin, flagMax int) (int, int, error) {
+	if flagMin >= 0 || flagMax >= 0 {
+		if flagMin < 0 || flagMax > 65535 || flagMax < flagMin {
+			return 0, 0, fmt.Errorf("invalid port range %d-%d (must satisfy 0 <= min <= max <= 65535)", flagMin, flagMax)
+		}
+		return flagMin, flagMax, nil
 	}
 	if !generic && ingestKey != "" {
 		cfgURL := strings.TrimRight(workerURL, "/") + "/config"
@@ -67,8 +132,9 @@ func resolveCaptureRange(workerURL, ingestKey string, generic bool, flagMin, fla
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					var cfg captureConfig
-					if json.NewDecoder(resp.Body).Decode(&cfg) == nil && cfg.SportMax >= cfg.SportMin {
-						return cfg.SportMin, cfg.SportMax
+					if json.NewDecoder(resp.Body).Decode(&cfg) == nil &&
+						cfg.SportMin >= 0 && cfg.SportMax <= 65535 && cfg.SportMax >= cfg.SportMin {
+						return cfg.SportMin, cfg.SportMax, nil
 					}
 				} else {
 					log.Printf("config endpoint returned %d; falling back to generic TCP", resp.StatusCode)
@@ -78,23 +144,18 @@ func resolveCaptureRange(workerURL, ingestKey string, generic bool, flagMin, fla
 			}
 		}
 	}
-	return 0, 65535
+	return 0, 65535, nil
 }
 
 // parseTCPPayload extracts flow, seq, source port, and TCP payload from a raw L2 or L3 IPv4 packet.
 func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
 	offset := 0
 	if hatype == arphrdEther {
-		if len(pkt) < 14 {
-			return chunk{}, false
-		}
-		ethType := binary.BigEndian.Uint16(pkt[12:14])
-		if ethType != 0x0800 {
+		if len(pkt) < 14 || binary.BigEndian.Uint16(pkt[12:14]) != 0x0800 {
 			return chunk{}, false
 		}
 		offset = 14
 	} else if hatype != arphrdNone && len(pkt) > 0 && (pkt[0]>>4) != 4 {
-		// Unknown link type and not IPv4 at offset 0
 		return chunk{}, false
 	}
 
@@ -104,7 +165,7 @@ func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
 	}
 	ihl := int(ip[0]&0x0f) * 4
 	totalLen := int(binary.BigEndian.Uint16(ip[2:4]))
-	if ihl < 20 || len(ip) < ihl || ip[9] != 6 { // proto 6 = TCP
+	if ihl < 20 || len(ip) < ihl || ip[9] != 6 {
 		return chunk{}, false
 	}
 	if totalLen > 0 && totalLen < len(ip) {
@@ -171,7 +232,7 @@ func dialWS(rawURL string, headers map[string]string) (*simpleWS, error) {
 
 	keyBytes := make([]byte, 16)
 	if _, err := rand.Read(keyBytes); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	wsKey := base64.StdEncoding.EncodeToString(keyBytes)
@@ -197,14 +258,14 @@ func dialWS(rawURL string, headers map[string]string) (*simpleWS, error) {
 	req.WriteString("\r\n")
 
 	if _, err := conn.Write([]byte(req.String())); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 
 	br := bufio.NewReader(conn)
 	statusLine, err := br.ReadString('\n')
 	if err != nil || !strings.Contains(statusLine, "101") {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("websocket upgrade failed: %q (%v)", strings.TrimSpace(statusLine), err)
 	}
 
@@ -213,7 +274,7 @@ func dialWS(rawURL string, headers map[string]string) (*simpleWS, error) {
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
@@ -225,7 +286,7 @@ func dialWS(rawURL string, headers map[string]string) (*simpleWS, error) {
 		}
 	}
 	if gotAccept != expectedAccept {
-		conn.Close()
+		_ = conn.Close()
 		return nil, errors.New("invalid Sec-WebSocket-Accept header")
 	}
 
@@ -239,13 +300,16 @@ func computeWSAccept(key string) string {
 }
 
 func (ws *simpleWS) SendText(data []byte) error {
+	if len(data) > maxFrameBytes {
+		return fmt.Errorf("frame size %d exceeds %d bytes", len(data), maxFrameBytes)
+	}
 	mask := make([]byte, 4)
 	if _, err := rand.Read(mask); err != nil {
 		return err
 	}
 	n := len(data)
 	header := make([]byte, 0, 14)
-	header = append(header, 0x81) // FIN + text frame
+	header = append(header, 0x81)
 	switch {
 	case n < 126:
 		header = append(header, 0x80|byte(n))
@@ -274,28 +338,133 @@ func (ws *simpleWS) Close() {
 	_ = ws.conn.Close()
 }
 
-func openRawSocket(ifaceName string) (int, error) {
-	iface, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return -1, fmt.Errorf("interface %s: %w", ifaceName, err)
+// Forwarder coordinates raw packet capture and resilient WebSocket ingestion.
+type Forwarder struct {
+	source    PacketSource
+	wsURL     string
+	headers   map[string]string
+	sportMin  int
+	sportMax  int
+	chunkChan chan chunk
+}
+
+func NewForwarder(source PacketSource, workerURL, roomID, ingestKey string, sportMin, sportMax int) *Forwarder {
+	wsURL := strings.Replace(workerURL, "http", "ws", 1) + "/room/" + url.PathEscape(roomID) + "?role=ingest"
+	headers := map[string]string{}
+	if ingestKey != "" {
+		headers["X-Ingest-Key"] = ingestKey
 	}
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPAll)))
-	if err != nil {
-		return -1, fmt.Errorf("AF_PACKET socket (run as root or CAP_NET_RAW): %w", err)
+	return &Forwarder{
+		source:    source,
+		wsURL:     wsURL,
+		headers:   headers,
+		sportMin:  sportMin,
+		sportMax:  sportMax,
+		chunkChan: make(chan chunk, 512),
 	}
-	sll := &syscall.SockaddrLinklayer{
-		Protocol: htons(ethPAll),
-		Ifindex:  iface.Index,
+}
+
+func (f *Forwarder) Run(ctx context.Context) error {
+	go func() {
+		<-ctx.Done()
+		_ = f.source.Close()
+	}()
+
+	go f.captureLoop(ctx)
+	return f.streamLoop(ctx)
+}
+
+func (f *Forwarder) captureLoop(ctx context.Context) {
+	buf := make([]byte, 65536)
+	for {
+		pkt, hatype, err := f.source.ReadPacket(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("capture stopped: %v", err)
+			return
+		}
+		c, ok := parseTCPPayload(pkt, hatype)
+		if !ok || int(c.Sport) < f.sportMin || int(c.Sport) > f.sportMax {
+			continue
+		}
+		select {
+		case f.chunkChan <- c:
+		default:
+			// Drop on extreme backpressure rather than stalling packet capture
+		}
 	}
-	if err := syscall.Bind(fd, sll); err != nil {
-		syscall.Close(fd)
-		return -1, fmt.Errorf("bind %s: %w", ifaceName, err)
+}
+
+func (f *Forwarder) streamLoop(ctx context.Context) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		ws, err := dialWS(f.wsURL, f.headers)
+		if err != nil {
+			log.Printf("ws connect failed: %v; retrying in 2s", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+		log.Printf("connected to %s", f.wsURL)
+		sendErr := f.pumpSession(ctx, ws)
+		ws.Close()
+		if ctx.Err() != nil {
+			return nil
+		}
+		log.Printf("ws disconnected (%v); reconnecting in 2s", sendErr)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
-	return fd, nil
+}
+
+func (f *Forwarder) pumpSession(ctx context.Context, ws *simpleWS) error {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	batch := make([]chunk, 0, maxBatchItems)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		payload, err := json.Marshal(batchPayload{Chunks: batch})
+		batch = batch[:0]
+		if err != nil {
+			return err
+		}
+		return ws.SendText(payload)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return flush()
+		case c := <-f.chunkChan:
+			batch = append(batch, c)
+			if len(batch) >= maxBatchItems {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		case <-ticker.C:
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func main() {
-	workerURL := flag.String("worker", "", "Worker base URL (e.g. https://maple-hub.example.workers.dev)")
+	workerFlag := flag.String("worker", "", "Worker base URL (e.g. https://maplesprint-hub.example.workers.dev)")
 	roomID := flag.String("room", "default", "Room ID")
 	ifaceName := flag.String("iface", "wg0", "Network interface to capture")
 	ingestKey := flag.String("key", os.Getenv("INGEST_KEY"), "Optional ingest key (or INGEST_KEY env)")
@@ -304,98 +473,33 @@ func main() {
 	sportMaxFlag := flag.Int("sport-max", -1, "Explicit maximum source port override")
 	flag.Parse()
 
-	if *workerURL == "" {
-		log.Fatal("--worker is required")
+	workerURL, err := validateWorkerURL(*workerFlag)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	sportMin, sportMax := resolveCaptureRange(*workerURL, *ingestKey, *generic, *sportMinFlag, *sportMaxFlag)
+	sportMin, sportMax, err := resolveCaptureRange(workerURL, *ingestKey, *generic, *sportMinFlag, *sportMaxFlag)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mode := "generic"
 	if sportMin > 0 || sportMax < 65535 {
 		mode = "filtered"
 	}
 	log.Printf("mode=%s iface=%s sport_range=%d-%d room=%s", mode, *ifaceName, sportMin, sportMax, *roomID)
 
-	fd, err := openRawSocket(*ifaceName)
+	source, err := OpenRawSocketSource(*ifaceName)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer syscall.Close(fd)
+	defer source.Close()
 
-	chChunks := make(chan chunk, 512)
-	go func() {
-		buf := make([]byte, 65536)
-		for {
-			n, sa, err := syscall.Recvfrom(fd, buf, 0)
-			if err != nil {
-				if errors.Is(err, syscall.EINTR) {
-					continue
-				}
-				log.Fatalf("recvfrom error: %v", err)
-			}
-			var hatype uint16 = arphrdNone
-			if sll, ok := sa.(*syscall.SockaddrLinklayer); ok {
-				hatype = sll.Hatype
-			}
-			c, ok := parseTCPPayload(buf[:n], hatype)
-			if !ok {
-				continue
-			}
-			if int(c.Sport) < sportMin || int(c.Sport) > sportMax {
-				continue
-			}
-			select {
-			case chChunks <- c:
-			default:
-				// Drop on extreme backpressure rather than stalling packet capture
-			}
-		}
-	}()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	wsURL := strings.Replace(strings.TrimRight(*workerURL, "/"), "http", "ws", 1) +
-		"/room/" + url.PathEscape(*roomID) + "?role=ingest"
-	headers := map[string]string{}
-	if *ingestKey != "" {
-		headers["X-Ingest-Key"] = *ingestKey
-	}
-
-	for {
-		ws, err := dialWS(wsURL, headers)
-		if err != nil {
-			log.Printf("ws connect failed: %v; retrying in 2s", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		log.Printf("connected to %s", wsURL)
-
-		ticker := time.NewTicker(flushInterval)
-		batch := make([]chunk, 0, maxBatchItems)
-		flush := func() error {
-			if len(batch) == 0 {
-				return nil
-			}
-			payload, err := json.Marshal(batchPayload{Chunks: batch})
-			batch = batch[:0]
-			if err != nil {
-				return err
-			}
-			return ws.SendText(payload)
-		}
-
-		var sendErr error
-		for sendErr == nil {
-			select {
-			case c := <-chChunks:
-				batch = append(batch, c)
-				if len(batch) >= maxBatchItems {
-					sendErr = flush()
-				}
-			case <-ticker.C:
-				sendErr = flush()
-			}
-		}
-		ticker.Stop()
-		ws.Close()
-		log.Printf("ws disconnected (%v); reconnecting in 2s", sendErr)
-		time.Sleep(2 * time.Second)
+	fwd := NewForwarder(source, workerURL, *roomID, *ingestKey, sportMin, sportMax)
+	if err := fwd.Run(ctx); err != nil {
+		log.Fatal(err)
 	}
 }
