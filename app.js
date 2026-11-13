@@ -57,9 +57,12 @@ const hasPreset = Array.from(dbSourceSelect.options).some((opt) => opt.value ===
 if (hasPreset) {
   dbSourceSelect.value = savedDb;
   dbInput.value = savedDb;
+  dbInput.hidden = true;
+  dbInput.classList.add("hidden");
 } else {
   dbSourceSelect.value = "custom";
   dbInput.value = savedDb;
+  dbInput.hidden = false;
   dbInput.classList.remove("hidden");
 }
 
@@ -252,10 +255,12 @@ function connect() {
 
 dbSourceSelect.addEventListener("change", () => {
   if (dbSourceSelect.value === "custom") {
+    dbInput.hidden = false;
     dbInput.classList.remove("hidden");
     dbInput.focus();
     return;
   }
+  dbInput.hidden = true;
   dbInput.classList.add("hidden");
   dbInput.value = dbSourceSelect.value;
   localStorage.setItem("ms_db", getCatalogBase());
