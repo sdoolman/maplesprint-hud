@@ -1,0 +1,5 @@
+{
+  "worker_url": "https://<YOUR_WORKER>.workers.dev",
+  "room_id": "<YOUR_ROOM_ID>",
+  "gateway_ip": "<WIREGUARD_GATEWAY_IP>"
+}

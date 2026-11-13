@@ -1,0 +1,13 @@
+# Endpoint (/etc/wireguard/wg0.conf) — works on Cloud VM, LAN Linux/Pi, or WSL2
+[Interface]
+Address = <WG_GATEWAY_IP>/24
+ListenPort = <WG_PORT>
+PrivateKey = <ENDPOINT_PRIVATE_KEY>
+
+# Replace <OUTBOUND_IFACE> with your real outbound NIC (e.g. eth0, ens3, wlan0)
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -t nat -A POSTROUTING -s <WG_SUBNET_CIDR> -o <OUTBOUND_IFACE> -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s <WG_SUBNET_CIDR> -o <OUTBOUND_IFACE> -j MASQUERADE
+
+[Peer]
+PublicKey = <CLIENT_PUBLIC_KEY>
+AllowedIPs = <CLIENT_WG_IP>/32

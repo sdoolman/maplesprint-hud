@@ -1,0 +1,52 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  forwarder-go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: forwarder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test -v ./...
+      - name: Build static Linux binaries (amd64 & arm64)
+        run: |
+          mkdir -p ../dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/wg-forwarder-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../dist/wg-forwarder-linux-arm64 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wg-forwarder-binaries
+          path: dist/wg-forwarder-linux-*
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/wg-forwarder-linux-*
+          generate_release_notes: true
+
+  hud-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check HUD JS
+        run: node --check app.js

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>MapleSprint HUD</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <div>
+        <h1>MapleSprint HUD</h1>
+        <p id="mapLine" class="muted">Not connected</p>
+      </div>
+      <span id="statusDot" class="pill offline">OFFLINE</span>
+    </header>
+
+    <section class="card config">
+      <input id="workerUrl" type="url" placeholder="Worker URL (e.g. https://maplesprint-hub.example.workers.dev)" />
+      <input id="roomId" type="text" placeholder="Room ID (e.g. default)" />
+      <input id="dbBase" type="url" placeholder="Catalog URL (default: OSMS Data Explorer)" />
+      <button id="connectBtn">Connect</button>
+    </section>
+
+    <section class="grid">
+      <div class="card"><div class="label">EXP / HR</div><div id="xph" class="val accent">0</div></div>
+      <div class="card"><div class="label">SESSION EXP</div><div id="sessionExp" class="val">0</div></div>
+      <div class="card"><div class="label">KILLS</div><div id="kills" class="val">0</div></div>
+      <div class="card"><div class="label">KILLS / MIN</div><div id="kpm" class="val">0.0</div></div>
+      <div class="card"><div class="label">HP</div><div id="hp" class="val hp">--</div></div>
+      <div class="card"><div class="label">MP</div><div id="mp" class="val mp">--</div></div>
+      <div class="card"><div class="label">MESOS</div><div id="mesos" class="val gold">0</div></div>
+      <div class="card"><div class="label">CATALOG</div><div id="dbStatus" class="val small">Loading...</div></div>
+    </section>
+
+    <section class="card">
+      <div class="label">LIVE FEED</div>
+      <ul id="feed" class="feed"></ul>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
