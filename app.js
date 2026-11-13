@@ -151,11 +151,29 @@ function render() {
   }
 }
 
+/** @type {number | null} */
+let pendingKillMobId = null;
+/** @type {number | null} */
+let pendingKillTimer = null;
+
+function clearPendingKill() {
+  pendingKillMobId = null;
+  if (pendingKillTimer !== null) {
+    clearTimeout(pendingKillTimer);
+    pendingKillTimer = null;
+  }
+}
+
 /** @param {TelemetryEvent} ev */
 function handleEvent(ev) {
   if (!state.startTs) state.startTs = Date.now();
   switch (ev.type) {
     case "exp_gain":
+      if (pendingKillMobId !== null) {
+        const mob = db.mobs[pendingKillMobId];
+        addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${pendingKillMobId}`}`);
+        clearPendingKill();
+      }
       state.sessionExp += ev.gain;
       state.kills += 1;
       addFeed(`+${ev.gain} EXP (Total: ${ev.total_exp.toLocaleString()})`);
@@ -173,8 +191,9 @@ function handleEvent(ev) {
       break;
     }
     case "mob_kill": {
-      const mob = db.mobs[ev.mob_id];
-      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${ev.mob_id}`}`);
+      clearPendingKill();
+      pendingKillMobId = ev.mob_id;
+      pendingKillTimer = window.setTimeout(clearPendingKill, 500);
       break;
     }
     case "item_loot": {
@@ -305,6 +324,7 @@ requireEl("shareBtn").addEventListener("click", async () => {
 });
 
 function resetLocalState() {
+  clearPendingKill();
   state.startTs = null;
   state.sessionExp = 0;
   state.kills = 0;
