@@ -45,6 +45,7 @@ const workerInput = /** @type {HTMLInputElement} */ (requireEl("workerUrl"));
 const roomInput = /** @type {HTMLInputElement} */ (requireEl("roomId"));
 const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
 const dbInput = /** @type {HTMLInputElement} */ (requireEl("dbBase"));
+const wakeBtn = /** @type {HTMLButtonElement} */ (requireEl("wakeBtn"));
 const statusDot = requireEl("statusDot");
 const mapLine = requireEl("mapLine");
 const feedEl = requireEl("feed");
@@ -328,6 +329,70 @@ requireEl("resetBtn").addEventListener("click", async () => {
     } catch {
       // Ignore network errors or 401 when an active ingester owns the room
     }
+  }
+});
+
+/** @type {WakeLockSentinel | null} */
+let wakeLock = null;
+let wakeWanted = localStorage.getItem("ms_wake") === "1";
+
+function updateWakeUi() {
+  const active = wakeLock !== null;
+  wakeBtn.classList.toggle("active", active);
+  wakeBtn.setAttribute("aria-pressed", String(active));
+  wakeBtn.textContent = active ? "☀ Awake" : "☀ Wake";
+}
+
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    wakeBtn.disabled = true;
+    wakeBtn.title = "Screen Wake Lock unsupported in this browser";
+    return;
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => {
+      wakeLock = null;
+      updateWakeUi();
+    });
+  } catch {
+    wakeLock = null;
+  }
+  updateWakeUi();
+}
+
+async function releaseWakeLock() {
+  if (wakeLock) {
+    try {
+      await wakeLock.release();
+    } catch {}
+    wakeLock = null;
+  }
+  updateWakeUi();
+}
+
+if (!("wakeLock" in navigator)) {
+  wakeBtn.disabled = true;
+  wakeBtn.title = "Screen Wake Lock unsupported in this browser";
+} else if (wakeWanted) {
+  requestWakeLock();
+}
+
+wakeBtn.addEventListener("click", async () => {
+  if (wakeLock) {
+    wakeWanted = false;
+    localStorage.setItem("ms_wake", "0");
+    await releaseWakeLock();
+  } else {
+    wakeWanted = true;
+    localStorage.setItem("ms_wake", "1");
+    await requestWakeLock();
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && wakeWanted && !wakeLock) {
+    requestWakeLock();
   }
 });
 

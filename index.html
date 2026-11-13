@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261113c" />
+  <link rel="stylesheet" href="style.css?v=20261114a" />
 </head>
 <body>
   <main class="wrap">
@@ -13,7 +13,10 @@
         <h1>MapleSprint HUD</h1>
         <p id="mapLine" class="muted">Not connected</p>
       </div>
-      <span id="statusDot" class="pill offline">OFFLINE</span>
+      <div class="top-actions">
+        <button id="wakeBtn" class="pill wake" type="button" aria-pressed="false" title="Keep screen awake">☀ Wake</button>
+        <span id="statusDot" class="pill offline">OFFLINE</span>
+      </div>
     </header>
 
     <section class="card config">
@@ -59,6 +62,6 @@
       <ul id="feed" class="feed"></ul>
     </section>
   </main>
-  <script src="app.js?v=20261113c"></script>
+  <script src="app.js?v=20261114a"></script>
 </body>
 </html>

@@ -14,11 +14,15 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; padding: 14px; }
 .wrap { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
-.top { display: flex; justify-content: space-between; align-items: center; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.top-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 h1 { font-size: 1.2rem; }
 .muted { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
 .pill { font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: #334155; }
 .pill.live { background: rgba(52, 211, 153, 0.18); color: var(--ok); }
+.pill.wake { border: 1px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; font-family: inherit; }
+.pill.wake.active { background: rgba(250, 204, 21, 0.16); border-color: rgba(250, 204, 21, 0.5); color: var(--gold); }
+.pill.wake:disabled { opacity: 0.45; cursor: not-allowed; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
 .config { display: flex; flex-direction: column; gap: 12px; }
 .config-group { display: flex; flex-direction: column; gap: 8px; }
