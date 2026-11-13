@@ -47,8 +47,15 @@ const statusDot = requireEl("statusDot");
 const mapLine = requireEl("mapLine");
 const feedEl = requireEl("feed");
 
+/** @returns {string} */
+function generateRoomId() {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  return "room-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 workerInput.value = localStorage.getItem("ms_worker") || "";
-roomInput.value = localStorage.getItem("ms_room") || "default";
+roomInput.value = localStorage.getItem("ms_room") || generateRoomId();
 dbInput.value = localStorage.getItem("ms_db") || DEFAULT_DB;
 
 /** @type {CatalogDB} */
@@ -179,8 +186,12 @@ function scheduleReconnect() {
 
 function connect() {
   const base = workerInput.value.trim().replace(/\/+$/, "");
-  const room = roomInput.value.trim() || "default";
   if (!base) return;
+  let room = roomInput.value.trim();
+  if (!room) {
+    room = generateRoomId();
+    roomInput.value = room;
+  }
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
