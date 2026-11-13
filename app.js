@@ -47,8 +47,9 @@ const statusDot = requireEl("statusDot");
 const mapLine = requireEl("mapLine");
 const feedEl = requireEl("feed");
 
-workerInput.value = localStorage.getItem("ms_worker") || "";
-roomInput.value = localStorage.getItem("ms_room") || "";
+const params = new URLSearchParams(window.location.search);
+workerInput.value = params.get("worker") || localStorage.getItem("ms_worker") || "";
+roomInput.value = params.get("room") || localStorage.getItem("ms_room") || "";
 dbInput.value = localStorage.getItem("ms_db") || DEFAULT_DB;
 
 /** @type {CatalogDB} */
@@ -237,5 +238,23 @@ requireEl("connectBtn").addEventListener("click", () => {
   connect();
 });
 
+requireEl("shareBtn").addEventListener("click", async () => {
+  const base = workerInput.value.trim().replace(/\/+$/, "");
+  const room = roomInput.value.trim();
+  if (!base || !room) {
+    mapLine.textContent = "Enter Worker URL and Room ID before sharing";
+    return;
+  }
+  const shareUrl = `${window.location.origin}${window.location.pathname}?worker=${encodeURIComponent(base)}&room=${encodeURIComponent(room)}`;
+  const btn = requireEl("shareBtn");
+  try {
+    await navigator.clipboard.writeText(shareUrl);
+    btn.textContent = "Copied!";
+    window.setTimeout(() => { btn.textContent = "Share"; }, 1500);
+  } catch {
+    window.prompt("Copy HUD share link:", shareUrl);
+  }
+});
+
 loadCatalog();
-if (workerInput.value.trim()) connect();
+if (workerInput.value.trim() && roomInput.value.trim()) connect();
