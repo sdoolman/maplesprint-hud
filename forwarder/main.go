@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -348,9 +349,19 @@ type Forwarder struct {
 	chunkChan chan chunk
 }
 
+func generateInstanceID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("inst-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 func NewForwarder(source PacketSource, workerURL, roomID, ingestKey string, sportMin, sportMax int) *Forwarder {
 	wsURL := strings.Replace(workerURL, "http", "ws", 1) + "/room/" + url.PathEscape(roomID) + "?role=ingest"
-	headers := map[string]string{}
+	headers := map[string]string{
+		"X-Ingest-Instance": generateInstanceID(),
+	}
 	if ingestKey != "" {
 		headers["X-Ingest-Key"] = ingestKey
 	}

@@ -91,7 +91,8 @@ PersistentKeepalive = 25
 ---
 
 ### 3️⃣ Open Your Live HUD
-Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) on your phone or second monitor, enter your **Hub URL** + **Room ID**, and hit **Connect**!
+Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) on your phone or second monitor, enter your **Hub URL** + your chosen **Room ID**, and hit **Connect**!
+*(Each room allows one active forwarder at a time — returning after a 5-minute idle timeout automatically resets the room.)*
 
 ---
 

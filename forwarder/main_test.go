@@ -96,3 +96,13 @@ func TestResolveCaptureRange(t *testing.T) {
 		t.Fatal("expected error for inverted port range")
 	}
 }
+
+func TestNewForwarderSetsInstanceHeader(t *testing.T) {
+	f := NewForwarder(nil, "https://example.workers.dev", "my-room", "k", 0, 65535)
+	if f.headers["X-Ingest-Instance"] == "" {
+		t.Fatal("expected non-empty X-Ingest-Instance header")
+	}
+	if f.headers["X-Ingest-Key"] != "k" {
+		t.Fatalf("expected X-Ingest-Key header, got %q", f.headers["X-Ingest-Key"])
+	}
+}
