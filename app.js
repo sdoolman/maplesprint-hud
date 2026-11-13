@@ -234,7 +234,34 @@ function connect() {
 }
 
 requireEl("connectBtn").addEventListener("click", () => {
-  loadCatalog();
+  function resetLocalState() {
+  state.startTs = null;
+  state.sessionExp = 0;
+  state.kills = 0;
+  state.mesos = 0;
+  state.hp = null;
+  state.mp = null;
+  state.mapId = null;
+  state.ch = null;
+  feedEl.replaceChildren();
+  mapLine.textContent = ws && ws.readyState === WebSocket.OPEN ? "Connected — waiting for game traffic..." : "Not connected";
+  render();
+}
+
+requireEl("resetBtn").addEventListener("click", async () => {
+  resetLocalState();
+  const base = workerInput.value.trim().replace(/\/+$/, "");
+  const room = roomInput.value.trim();
+  if (base && room) {
+    try {
+      await fetch(`${base}/room/${encodeURIComponent(room)}`, { method: "DELETE" });
+    } catch {
+      // Ignore network errors or 401 when an active ingester owns the room
+    }
+  }
+});
+
+loadCatalog();
   connect();
 });
 
@@ -253,6 +280,33 @@ requireEl("shareBtn").addEventListener("click", async () => {
     window.setTimeout(() => { btn.textContent = "Share"; }, 1500);
   } catch {
     window.prompt("Copy HUD share link:", shareUrl);
+  }
+});
+
+function resetLocalState() {
+  state.startTs = null;
+  state.sessionExp = 0;
+  state.kills = 0;
+  state.mesos = 0;
+  state.hp = null;
+  state.mp = null;
+  state.mapId = null;
+  state.ch = null;
+  feedEl.replaceChildren();
+  mapLine.textContent = ws && ws.readyState === WebSocket.OPEN ? "Connected — waiting for game traffic..." : "Not connected";
+  render();
+}
+
+requireEl("resetBtn").addEventListener("click", async () => {
+  resetLocalState();
+  const base = workerInput.value.trim().replace(/\/+$/, "");
+  const room = roomInput.value.trim();
+  if (base && room) {
+    try {
+      await fetch(`${base}/room/${encodeURIComponent(room)}`, { method: "DELETE" });
+    } catch {
+      // Ignore network errors or 401 when an active ingester owns the room
+    }
   }
 });
 
