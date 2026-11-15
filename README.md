@@ -2,8 +2,8 @@
 
 # ⚡ MapleSprint HUD
 
-**Real-time EXP/hr, Level ETA, Best Maps Guide, and Farming Splits for MapleStory Classic World**  
-*Zero OCR · Zero Memory Hooks · 100% Home Residential IP · Open-Source Local Relay*
+**Real-time EXP/hr, Level ETA, Best Maps Guide, and Loot on your phone or second screen**  
+*Zero drivers · Zero OCR · Safe single-IP tunnel · Open-source local relay*
 
 [![Live HUD](https://img.shields.io/badge/Live_HUD-Open_App-2ea44f?style=for-the-badge&logo=githubpages&logoColor=white)](https://sdoolman.github.io/maplesprint-hud/)
 [![CI & Releases](https://img.shields.io/github/actions/workflow/status/sdoolman/maplesprint-hud/ci.yml?style=for-the-badge&label=Build)](https://github.com/sdoolman/maplesprint-hud/actions)
@@ -16,80 +16,99 @@
 
 ## ✨ How It Works
 
-Unlike screen-scraping OCR overlays (`PrintWindow` / DXGI hooks) that misread digits, miss item drops, and trigger antivirus alerts, **MapleSprint** uses a clean split-tunnel + browser architecture:
+Your game traffic stays clean on your own residential IP through WireGuard, while a slim, 100% open-source local relay mirrors a read-only copy to your browser HUD:
 
-```mermaid
-flowchart LR
-  subgraph PC["🎮 Gaming PC (Windows 10/11)"]
-    MS["MapleStory.exe"]
-    WG["Official WireGuard\n(158.115.192.0/19)"]
-    EP["maplesprint-endpoint.exe\n(Slim Open-Source Relay)"]
-    HUD["GitHub Pages HUD\n(Browser Tab + PiP Mini)"]
-  end
-
-  NEXON["🍁 Nexon Game Servers\n(100% Home Residential IP)"]
-  WORKER["☁️ Telemetry Hub Worker\n(Origin-Gated /codec.mjs)"]
-
-  MS -->|"TCP 8484–8999"| WG
-  WG -->|"127.0.0.1:51820"| EP
-  EP -->|"Physical NIC (No-Loop)"| NEXON
-  EP -->|"ws://127.0.0.1:8080/ws\n(Raw TCP Segments)"| HUD
-  WORKER -.->|"Loads /codec.mjs once\non HUD startup"| HUD
+```text
+  🎮 Gaming PC ──(WireGuard)──▶ 🌐 Local Endpoint ──▶ 🍁 Game Servers
+                                       │               (100% your home IP)
+                                 (mirrors copy)
+                                       ▼
+                              📱 Browser / Phone HUD ◀──(loads codec once)── ☁️ Telemetry Hub
 ```
 
-- **100% Open-Source & Auditable Local Relay (`forwarder/`):** `maplesprint-endpoint.exe` is a tiny, dependency-light Go relay (`golang.org/x/net/websocket`) with **zero** embedded UI and **zero** proprietary game code. It binds strictly to `127.0.0.1:51820` and `127.0.0.1:8080` (zero UAC or Windows Firewall popups) and pins outbound sockets to your physical Wi-Fi/Ethernet NIC (`NewPhysicalNICDialer`) so traffic never loops back into WireGuard.
-- **100% Home Residential IP & Game Stability:** Chrome is never in the critical game forwarding path — refreshing or closing the HUD tab never disconnects or lags `MapleStory.exe`.
-- **Safe Worker-Loaded Browser Codec:** When you open the GitHub Pages HUD, it loads the packet decoder module (`/codec.mjs`) once from the Cloudflare Worker and decodes the local `ws://127.0.0.1:8080/ws` stream directly in browser memory at **0 ms latency**.
+- **Nothing touches the game:** No memory reading, no screen capture, no window hooks, and no custom kernel drivers on your PC.
+- **100% Open-Source & Slim Relay:** The local endpoint executable only relays raw TCP segments over localhost (`127.0.0.1:8080`) with zero UAC or Windows Firewall popups.
+- **Browser-Independent Game Stability:** Closing or refreshing the HUD tab never interrupts or lags your game connection.
 
 ---
 
-## 🚀 Quick Start (2 Minutes)
+## 🚀 Quick Start (3 Minutes)
 
-### 1️⃣ Start the Open-Source Local Endpoint
-Download **`maplesprint-endpoint-windows-amd64.exe`** (Windows) or **`wg-forwarder-linux-amd64`** (Linux) from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases) and run it:
+### 1️⃣ Start the Local Endpoint (Windows PC, Raspberry Pi, or Linux)
+Download the latest **`maplesprint-endpoint-windows-amd64.exe`** (Windows) or **`wg-forwarder-linux-amd64`** (Linux) from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases) and run it:
 
 ```powershell
-# Windows (runs on 127.0.0.1:51820 & 127.0.0.1:8080 with zero Admin/Firewall prompts)
+# Windows (runs on 127.0.0.1:51820 & 127.0.0.1:8080 — no Admin required)
 .\maplesprint-endpoint-windows-amd64.exe
 ```
 
-### 2️⃣ Open the Unified Dashboard & HUD
-Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) in Chrome or Edge:
-1. Click **`⚙ Endpoint`** in the top bar to open the **WireGuard + Local Endpoint Dashboard**.
-2. Click **`⬇ MapleSprint.conf`**, import it into [**Official WireGuard**](https://www.wireguard.com/install/), and click **Activate**.
-3. Click **`Connect Endpoint`** (or **`⧉ Mini`** to pop out the always-on-top Picture-in-Picture mini overlay) and start grinding!
+<details>
+<summary>🔧 Running on a separate Linux / Raspberry Pi endpoint instead? Click here</summary>
+
+1. Start the endpoint helper script (auto-generates WireGuard keys & split-tunnel config on first run):
+   ```bash
+   ./deploy/start_endpoint.sh wg0
+   ```
+2. Or generate keys manually and copy [`deploy/wg0.conf.example`](deploy/wg0.conf.example) to `/etc/wireguard/wg0.conf`:
+   ```bash
+   wg genkey | tee endpoint.key | wg pubkey > endpoint.pub
+   wg genkey | tee client.key   | wg pubkey > client.pub
+   sudo wg-quick up wg0
+   ```
+
+</details>
 
 ---
 
-## 🏆 Features
-
-| Tab / Feature | What It Does |
-|---|---|
-| **⚙ Endpoint Dashboard** | Real-time status for **1. WireGuard Tunnel (`:51820`)**, **2. Local Endpoint Relay (`127.0.0.1:8080` + Physical Outbound IP)**, and **3. Cloudflare Worker Codec (`/codec.mjs`)**, plus 1-click `MapleSprint.conf` download. |
-| **⚡ Live HUD & 15s Auto-Pause** | Tracks Session `EXP / HR` and **5-Minute Rolling `EXP / HR` (`5m: X/h`)**, automatically pausing active grind timers after 15 seconds of inactivity (`ACTIVE` / `PAUSED` badge). |
-| **📈 Level `%`, `ETA` & Death Loss** | Uses the Classic World Level `1–200` EXP table (`CLASSIC_EXP_TABLE`) to compute exact level progress `%`, real-time `ETA` to next level, and negative Death EXP loss deltas. |
-| **💰 Net Loot (`Mesos + NPC Value`)** | Automatically prices every dropped item using `items.json` NPC sell prices and adds it to your Meso/hr rate. |
-| **⧉ Mini Overlay (Picture-in-Picture)** | One-click W3C Document Picture-in-Picture window that floats on top of the game showing live `EXP / HR`, `5m` rate, `Lv. %`, and `ETA`. |
-| **🗺️ Best Maps Hunting Guide** | Ranks every hunting ground in `maps.json` + `monsters.json` for your exact **Level (`1–200`)** and **Class/Job** (`Warrior`, `I/L & F/P Magician`, `Cleric / Priest` Holy/Undead affinity, `Bowman`, `Thief`), blended with your own **Recorded `EXP / HR`**. |
-| **📜 Map Log (Farming Splits)** | Automatically records a per-map farming split whenever you change maps (Active Time, EXP Gained, `EXP / HR`, Kills, Mesos, Drops), persisted to `localStorage` with 1-click JSON export. |
-
----
-
-## 🛠️ Verification & CLI Options
-
-```bash
-node --check app.js
-node --test verify.mjs
-```
+### 2️⃣ Connect WireGuard (Windows)
+1. Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) and click **`⚙ Endpoint`** in the top bar.
+2. Click **`⬇ MapleSprint.conf`** to download your split-tunnel configuration.
+3. Import `MapleSprint.conf` in [**WireGuard for Windows**](https://www.wireguard.com/install/) and click **Activate**.
 
 <details>
-<summary>⚙️ Endpoint CLI Flags (`forwarder/main.go`)</summary>
+<summary>📄 Example Windows WireGuard split-tunnel config</summary>
 
-- `--listen-udp` *(default `127.0.0.1:51820`)*: Localhost UDP address for unprivileged packet relay.
-- `--http` *(default `127.0.0.1:8080`)*: Localhost API & WebSocket address for the GitHub Pages HUD.
-- `--outbound-ip` *(default auto-detected)*: Physical LAN IPv4 address for no-loop outbound NIC binding.
-- `--iface` *(default `wg0`)*: Tunnel interface to capture when running in Linux interface mode.
-- `--sport-min` / `--sport-max` *(default `8484`–`8999`)*: Game TCP source port filter range.
+```ini
+[Interface]
+PrivateKey = <CLIENT_PRIVATE_KEY>
+Address = 10.66.66.2/32
+
+[Peer]
+PublicKey = <ENDPOINT_PUBLIC_KEY>
+Endpoint = 127.0.0.1:51820
+AllowedIPs = 158.115.192.0/19
+PersistentKeepalive = 25
+```
+
+</details>
+
+---
+
+### 3️⃣ Track Your Grind Live
+With [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) open in your browser:
+- **⚡ Live HUD:** Real-time **Session `EXP / HR`**, **5-Minute Rolling `EXP / HR`**, **15s Idle Auto-Pause** (`ACTIVE` / `PAUSED`), **Level Progress `%` & `ETA`**, **Death EXP Loss**, **HP/MP**, and **Net Loot Value** (Mesos + NPC sell prices).
+- **⧉ Mini Overlay:** Click **`⧉ Mini`** in the top bar to pop out an always-on-top Picture-in-Picture mini window while playing.
+- **🗺️ Best Maps:** Filter hunting grounds by your **Character Level (`1–200`)** and **Class/Job** (`Warrior`, `I/L & F/P Magician`, `Cleric / Priest`, `Bowman`, `Thief`), ranked alongside your own **Recorded `EXP / HR`**.
+- **📜 Map Log:** Automatic per-map farming splits table (Active Time, EXP Gained, `EXP / HR`, Kills, Mesos, Drops) with 1-click JSON export.
+
+---
+
+## 🛠️ Troubleshooting & Options
+
+<details>
+<summary>❓ Common fixes & CLI flags</summary>
+
+| Problem | Quick Fix |
+|---|---|
+| **Endpoint shows `Offline` in dashboard** | Make sure `maplesprint-endpoint-windows-amd64.exe` is running and the URL is set to `http://127.0.0.1:8080` |
+| **WireGuard tunnel shows `Waiting (:51820)`** | Make sure `MapleSprint.conf` is **Activated** in WireGuard for Windows and you are logged into a game channel |
+| **Mini overlay doesn't float on top** | Use Chrome or Edge (which support the W3C Document Picture-in-Picture API) |
+
+**Endpoint flags (`maplesprint-endpoint`):**
+- `--listen-udp` *(default `127.0.0.1:51820`)*: Localhost UDP address for packet capture
+- `--http` *(default `127.0.0.1:8080`)*: Localhost API & WebSocket address for the HUD
+- `--outbound-ip` *(default auto-detected)*: Physical LAN IPv4 address for outbound NIC binding
+- `--iface` *(default `wg0`)*: Network interface to capture on Linux (`--listen-udp=""`)
 
 </details>
 
@@ -97,5 +116,5 @@ node --test verify.mjs
 
 ## 🤝 Contributing & License
 
-Pull requests for HUD improvements or open-source relay enhancements are welcome.  
+Pull requests for HUD improvements, endpoint scripts, or forwarder fixes are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).  
 Licensed under the [MIT License](LICENSE).
