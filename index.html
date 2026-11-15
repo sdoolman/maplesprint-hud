@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261115a" />
+  <link rel="stylesheet" href="style.css?v=20261115b" />
 </head>
 <body>
   <main class="wrap">
@@ -36,7 +36,7 @@
         <div class="config-group">
           <div class="label-row">
             <div class="label">WIREGUARD + LOCAL ENDPOINT DASHBOARD</div>
-            <span id="wasmStatusBadge" class="mini-tag">WASM: Loading...</span>
+            <span id="wasmStatusBadge" class="mini-tag">CODEC: Loading...</span>
           </div>
           <div class="bridge-grid">
             <div class="bridge-node">
@@ -50,9 +50,9 @@
               <span id="outboundIpTag" class="sub">Outbound NIC: Auto (No-Loop)</span>
             </div>
             <div class="bridge-node">
-              <span class="label">3. BROWSER WASM CODEC</span>
-              <strong id="wasmNodeDetail" class="bridge-val">codec.wasm</strong>
-              <span class="sub">0 ms Local Stream Decode</span>
+              <span class="label">3. CLOUDFLARE WORKER CODEC</span>
+              <strong id="wasmNodeDetail" class="bridge-val">Loading /codec.mjs…</strong>
+              <span class="sub">Origin-Gated · 0 ms Local Run</span>
             </div>
           </div>
           <div class="row-worker">
@@ -65,7 +65,7 @@
             <button id="resetBtn" class="btn-sec" type="button">Reset Session</button>
           </div>
           <div class="share-row">
-            <span class="muted small">Open-source relay streams raw TCP segments to browser <code>codec.wasm</code>.</span>
+            <span class="muted small">Open-source relay streams raw TCP segments decoded in-browser via Worker codec.</span>
             <button id="shareBtn" class="pill wake" type="button">Share Link</button>
           </div>
         </div>
@@ -226,6 +226,6 @@
       </section>
     </div>
   </main>
-  <script src="app.js?v=20261115a"></script>
+  <script src="app.js?v=20261115b"></script>
 </body>
 </html>

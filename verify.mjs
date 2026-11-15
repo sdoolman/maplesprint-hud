@@ -71,6 +71,7 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
   }
   assert.match(js, /CLASSIC_EXP_TABLE/);
   assert.match(js, /AUTO_PAUSE_IDLE_MS\s*=\s*15_000/);
+  assert.match(js, /DEFAULT_CODEC_WORKER/);
   assert.match(js, /function initCodecWasm\(\)/);
   assert.match(js, /function ingestRawChunkWasm\(/);
   assert.match(js, /function probeEndpointStatus\(\)/);
@@ -80,16 +81,9 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
   assert.match(js, /function togglePipOverlay\(\)/);
 });
 
-test("codec.wasm is valid WebAssembly and public repo contains zero plaintext MapleStory opcodes or codec.go", async () => {
+test("public repo contains zero codec files (no codec.wasm or codec.go) and zero plaintext MapleStory opcodes", () => {
   assert.ok(!existsSync(new URL("./forwarder/codec.go", import.meta.url)), "forwarder/codec.go must not exist in public repo");
-
-  const wasmBytes = readFileSync(new URL("./codec.wasm", import.meta.url));
-  const { instance } = await WebAssembly.instantiate(wasmBytes);
-  const { get_in_ptr, get_res_ptr, check_header, decode_frame } = /** @type {any} */ (instance.exports);
-  assert.equal(typeof get_in_ptr, "function");
-  assert.equal(typeof get_res_ptr, "function");
-  assert.equal(check_header(0x1111, 0x1111 ^ 32), 32);
-  assert.equal(typeof decode_frame, "function");
+  assert.ok(!existsSync(new URL("./codec.wasm", import.meta.url)), "codec.wasm must not exist in public repo");
 
   const mainGo = readFileSync(new URL("./forwarder/main.go", import.meta.url), "utf8");
   for (const forbidden of [
@@ -113,7 +107,6 @@ test("codec.wasm is valid WebAssembly and public repo contains zero plaintext Ma
     assert.ok(!mainGo.includes(forbidden), `Secret signature "${forbidden}" must not appear in forwarder/main.go`);
   }
 
-  // Verify forwarder/main.go is a clean, UI-free open-source relay using golang.org/x/net/websocket
   assert.match(mainGo, /golang\.org\/x\/net\/websocket/);
   assert.match(mainGo, /Access-Control-Allow-Private-Network/);
   assert.match(mainGo, /NewPhysicalNICDialer/);

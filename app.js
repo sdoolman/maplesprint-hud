@@ -3,11 +3,9 @@
 
 const DEFAULT_DB = "https://osmsdataexplorer.com/data/current/";
 const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:8080";
+const DEFAULT_CODEC_WORKER = "https://maplesprint-hub.stav973.workers.dev";
 const AUTO_PAUSE_IDLE_MS = 15_000;
 const ROLLING_WINDOW_MS = 5 * 60 * 1000;
-const MAX_WASM_FLOWS = 8;
-const MAX_FLOW_BUFFER = 262_144;
-const MAX_OOO_SEGMENTS = 32;
 
 // Classic World (pre-Big Bang) Level 1-200 EXP curve
 const CLASSIC_EXP_TABLE = (() => {
@@ -203,67 +201,36 @@ manualLevelInput.value = String(state.level);
 guideLevelInput.value = String(state.level > 1 ? state.level : 25);
 
 // ============================================================================
-// In-Browser WebAssembly Codec Engine (codec.wasm)
+// Private Cloudflare Worker Codec Loader (/codec.mjs)
 // ============================================================================
 
-const wasmEngine = {
+const codecEngine = {
   ready: false,
   /** @type {any} */
-  exports: null,
-  inPtr: 0,
-  resPtr: 0,
-  /** @type {Map<string, { nextSeq: number | null, buf: Uint8Array, ooo: Map<number, Uint8Array> }>} */
-  flows: new Map(),
-  /** @type {Map<number, number>} */
-  mobOidToId: new Map(),
-  /** @type {number | null} */
-  lastTotalExp: null,
-  /** @type {number | null} */
-  pendingMsgExp: null,
+  decoder: null,
 };
 
 async function initCodecWasm() {
+  const codecBase = (
+    params.get("codec") ||
+    localStorage.getItem("ms_codec_worker") ||
+    DEFAULT_CODEC_WORKER
+  ).replace(/\/+$/, "");
+
   try {
-    const wasmUrl = new URL("./codec.wasm", window.location.href);
-    let instance;
-    if ("instantiateStreaming" in WebAssembly) {
-      try {
-        const res = await WebAssembly.instantiateStreaming(fetch(wasmUrl));
-        instance = res.instance;
-      } catch {
-        const buf = await (await fetch(wasmUrl)).arrayBuffer();
-        const res = await WebAssembly.instantiate(buf);
-        instance = res.instance;
-      }
-    } else {
-      const buf = await (await fetch(wasmUrl)).arrayBuffer();
-      const res = await WebAssembly.instantiate(buf);
-      instance = res.instance;
+    const mod = await import(`${codecBase}/codec.mjs`);
+    if (typeof mod.MapleDecoder !== "function") {
+      throw new Error("Invalid codec module");
     }
-    wasmEngine.exports = instance.exports;
-    wasmEngine.inPtr = wasmEngine.exports.get_in_ptr();
-    wasmEngine.resPtr = wasmEngine.exports.get_res_ptr();
-    wasmEngine.ready = true;
-    wasmStatusBadge.textContent = "WASM: Ready";
-    wasmNodeDetail.textContent = "codec.wasm (Active)";
+    codecEngine.decoder = new mod.MapleDecoder();
+    codecEngine.ready = true;
+    wasmStatusBadge.textContent = "CODEC: Ready";
+    wasmNodeDetail.textContent = "Worker Codec (Active)";
     wasmNodeDetail.classList.add("online");
   } catch {
-    wasmStatusBadge.textContent = "WASM: Error";
-    wasmNodeDetail.textContent = "codec.wasm failed";
+    wasmStatusBadge.textContent = "CODEC: Standby";
+    wasmNodeDetail.textContent = "Worker /codec.mjs";
   }
-}
-
-function seqDiff32(a, b) {
-  return (a - b) | 0;
-}
-
-function concatBytes(a, b) {
-  if (a.length === 0) return b;
-  if (b.length === 0) return a;
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
 }
 
 function base64ToBytes(b64) {
@@ -274,13 +241,13 @@ function base64ToBytes(b64) {
 }
 
 /**
- * Ingests a raw TCP segment from maplesprint-endpoint into codec.wasm.
+ * Ingests a raw TCP segment from maplesprint-endpoint into the Worker-loaded MapleDecoder.
  * @param {string} flow
  * @param {number} seq
  * @param {string} b64Data
  */
 function ingestRawChunkWasm(flow, seq, b64Data) {
-  if (!wasmEngine.ready || !b64Data) return;
+  if (!codecEngine.ready || !codecEngine.decoder || !b64Data) return;
   const payload = base64ToBytes(b64Data);
   if (payload.length === 0) return;
 
@@ -288,185 +255,13 @@ function ingestRawChunkWasm(flow, seq, b64Data) {
   wgTunnelStatus.textContent = `Active (${state.rawChunksReceived.toLocaleString()} segs)`;
   wgTunnelStatus.classList.add("online");
 
-  let fb = wasmEngine.flows.get(flow);
-  if (!fb) {
-    if (wasmEngine.flows.size >= MAX_WASM_FLOWS) {
-      const oldestKey = wasmEngine.flows.keys().next().value;
-      if (oldestKey !== undefined) wasmEngine.flows.delete(oldestKey);
+  const events = codecEngine.decoder.feedChunk(flow, seq, payload);
+  if (Array.isArray(events) && events.length > 0) {
+    for (const ev of events) {
+      handleEvent(ev);
     }
-    fb = { nextSeq: null, buf: new Uint8Array(0), ooo: new Map() };
-    wasmEngine.flows.set(flow, fb);
+    render();
   }
-
-  const uSeq = seq >>> 0;
-  if (fb.nextSeq === null) {
-    fb.nextSeq = (uSeq + payload.length) >>> 0;
-    fb.buf = concatBytes(fb.buf, payload);
-  } else {
-    const d = seqDiff32(uSeq, fb.nextSeq);
-    if (d === 0) {
-      fb.buf = concatBytes(fb.buf, payload);
-      fb.nextSeq = (uSeq + payload.length) >>> 0;
-      while (fb.ooo.has(fb.nextSeq)) {
-        const nextSeg = /** @type {Uint8Array} */ (fb.ooo.get(fb.nextSeq));
-        fb.ooo.delete(fb.nextSeq);
-        fb.buf = concatBytes(fb.buf, nextSeg);
-        fb.nextSeq = (fb.nextSeq + nextSeg.length) >>> 0;
-      }
-    } else if (d < 0) {
-      const overlap = -d;
-      if (overlap < payload.length) {
-        const tail = payload.subarray(overlap);
-        fb.buf = concatBytes(fb.buf, tail);
-        fb.nextSeq = (fb.nextSeq + tail.length) >>> 0;
-      }
-    } else {
-      if (fb.ooo.size >= MAX_OOO_SEGMENTS) {
-        const sorted = [...fb.ooo.keys()].sort(seqDiff32);
-        const first = sorted[0];
-        const seg = /** @type {Uint8Array} */ (fb.ooo.get(first));
-        fb.ooo.delete(first);
-        fb.buf = concatBytes(fb.buf, seg);
-        fb.nextSeq = (first + seg.length) >>> 0;
-      }
-      fb.ooo.set(uSeq, payload);
-    }
-  }
-
-  if (fb.buf.length > MAX_FLOW_BUFFER) {
-    fb.buf = fb.buf.slice(fb.buf.length - (MAX_FLOW_BUFFER >> 1));
-  }
-
-  const { memory, check_header, decode_frame } = wasmEngine.exports;
-  const memU8 = new Uint8Array(memory.buffer);
-  const resI32 = new Int32Array(memory.buffer, wasmEngine.resPtr, 12);
-  const resU32 = new Uint32Array(memory.buffer, wasmEngine.resPtr, 12);
-
-  while (fb.buf.length >= 4) {
-    const h0 = fb.buf[0] | (fb.buf[1] << 8);
-    const h1 = fb.buf[2] | (fb.buf[3] << 8);
-    const pLen = check_header(h0, h1);
-    if (pLen <= 0) {
-      fb.buf = fb.buf.subarray(1);
-      continue;
-    }
-    if (fb.buf.length < 4 + pLen) break;
-
-    const frame = fb.buf.subarray(4, 4 + pLen);
-    fb.buf = fb.buf.subarray(4 + pLen);
-
-    memU8.set(frame, wasmEngine.inPtr);
-    const kind = decode_frame(pLen);
-    if (kind === 0) continue;
-
-    const now = Date.now();
-    if (kind === 1) {
-      // map_change
-      wasmEngine.mobOidToId.clear();
-      handleEvent({ type: "map_change", map_id: resI32[1], channel: resI32[2], ts: now });
-    } else if (kind === 2) {
-      // stat_changed
-      const flags = resI32[1];
-      let leveledUp = false;
-      if (flags & 1) {
-        const lv = resI32[2];
-        if (lv >= 1 && lv <= 200) {
-          if (state.level && lv > state.level) leveledUp = true;
-          handleEvent({
-            type: "char_stats",
-            level: lv,
-            job: flags & 2 ? resI32[3] : state.job,
-            max_hp: flags & 8 ? resI32[5] : state.maxHp,
-            max_mp: flags & 32 ? resI32[7] : state.maxMp,
-            ts: now,
-          });
-        }
-      } else if (flags & (2 | 8 | 32 | 128)) {
-        handleEvent({
-          type: "char_stats",
-          level: state.level,
-          job: flags & 2 ? resI32[3] : state.job,
-          max_hp: flags & 8 ? resI32[5] : state.maxHp,
-          max_mp: flags & 32 ? resI32[7] : state.maxMp,
-          mesos: flags & 128 ? resU32[10] : undefined,
-          ts: now,
-        });
-      }
-
-      if (flags & (4 | 16)) {
-        const newHp = flags & 4 ? resI32[4] : state.hp;
-        const newMp = flags & 16 ? resI32[6] : state.mp;
-        const hpDelta = flags & 4 && state.hp !== null ? newHp - state.hp : undefined;
-        const mpDelta = flags & 16 && state.mp !== null ? newMp - state.mp : undefined;
-        const dmgTaken = hpDelta !== undefined && hpDelta < 0 ? -hpDelta : undefined;
-        handleEvent({
-          type: "hp_mp",
-          hp: newHp,
-          mp: newMp,
-          max_hp: flags & 8 ? resI32[5] : state.maxHp,
-          max_mp: flags & 32 ? resI32[7] : state.maxMp,
-          hp_delta: hpDelta,
-          mp_delta: mpDelta,
-          damage_taken: dmgTaken,
-          ts: now,
-        });
-      }
-
-      if (flags & 64) {
-        const newExp = resU32[8] + resU32[9] * 4294967296;
-        let gain = 0;
-        let isLoss = false;
-        if (wasmEngine.pendingMsgExp !== null && wasmEngine.pendingMsgExp > 0) {
-          gain = wasmEngine.pendingMsgExp;
-          wasmEngine.pendingMsgExp = null;
-        } else if (wasmEngine.lastTotalExp !== null) {
-          if (newExp >= wasmEngine.lastTotalExp) {
-            gain = newExp - wasmEngine.lastTotalExp;
-          } else if (!leveledUp) {
-            gain = newExp - wasmEngine.lastTotalExp;
-            isLoss = true;
-          }
-        }
-        wasmEngine.lastTotalExp = newExp;
-        if (gain !== 0) {
-          handleEvent({
-            type: "exp_gain",
-            gain,
-            total_exp: newExp,
-            loss: isLoss,
-            map_id: state.mapId,
-            ts: now,
-          });
-        }
-      }
-    } else if (kind === 3) {
-      const sub = resI32[1];
-      if (sub === 1) {
-        handleEvent({ type: "item_loot", item_id: resI32[2], qty: resI32[3], ts: now });
-      } else if (sub === 2) {
-        handleEvent({ type: "meso_loot", amount: resI32[2], ts: now });
-      } else if (sub === 3) {
-        wasmEngine.pendingMsgExp = resI32[2];
-      }
-    } else if (kind === 4) {
-      if (wasmEngine.mobOidToId.size > 500) wasmEngine.mobOidToId.clear();
-      wasmEngine.mobOidToId.set(resU32[1], resU32[2]);
-    } else if (kind === 5) {
-      const oid = resU32[1];
-      const mobId = wasmEngine.mobOidToId.get(oid);
-      if (mobId !== undefined) {
-        wasmEngine.mobOidToId.delete(oid);
-        if (resI32[2] === 1) {
-          handleEvent({ type: "mob_kill", mob_oid: oid, mob_id: mobId, ts: now });
-        }
-      }
-    } else if (kind === 6) {
-      const oid = resU32[1];
-      const mobId = wasmEngine.mobOidToId.get(oid) ?? null;
-      handleEvent({ type: "mob_damage", mob_oid: oid, mob_id: mobId, damage: resI32[2], ts: now });
-    }
-  }
-  render();
 }
 
 // ============================================================================
@@ -1519,10 +1314,9 @@ function resetLocalState() {
   state.rawChunksReceived = 0;
   state.expWindow = [];
   state.currentSplit = null;
-  wasmEngine.flows.clear();
-  wasmEngine.mobOidToId.clear();
-  wasmEngine.lastTotalExp = null;
-  wasmEngine.pendingMsgExp = null;
+  if (codecEngine.decoder && typeof codecEngine.decoder.reset === "function") {
+    codecEngine.decoder.reset();
+  }
   feedEl.replaceChildren();
   mapLine.textContent = ws && ws.readyState === WebSocket.OPEN ? "Connected — waiting for WireGuard game traffic..." : "Not connected";
   render();
