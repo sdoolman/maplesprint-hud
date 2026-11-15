@@ -3,9 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/binary"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"testing"
+	"time"
 )
 
 func buildIPv4TCPPacket(srcIP, dstIP [4]byte, sport, dport uint16, seq uint32, payload []byte) []byte {
@@ -26,14 +26,14 @@ func buildIPv4TCPPacket(srcIP, dstIP [4]byte, sport, dport uint16, seq uint32, p
 	return pkt
 }
 
-func TestParseTCPPayloadL3AndL2(t *testing.T) {
+func TestParseTCPPayloadL3AndL2AndPPP(t *testing.T) {
 	rawIP := buildIPv4TCPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 2}, 443, 51000, 0x11223344, []byte("hello"))
 
 	c, ok := parseTCPPayload(rawIP, arphrdNone)
 	if !ok {
 		t.Fatal("expected L3 packet to parse")
 	}
-	if c.Flow != "198.51.100.1:443->192.0.2.2:51000" || c.Seq != 0x11223344 || c.Sport != 443 {
+	if c.Type != "raw_chunk" || c.Flow != "198.51.100.1:443->192.0.2.2:51000" || c.Seq != 0x11223344 || c.Sport != 443 {
 		t.Fatalf("unexpected chunk metadata: %+v", c)
 	}
 	if got, _ := base64.StdEncoding.DecodeString(c.Data); string(got) != "hello" {
@@ -49,6 +49,17 @@ func TestParseTCPPayloadL3AndL2(t *testing.T) {
 		t.Fatalf("expected L2 Ethernet packet to parse, got ok=%v chunk=%+v", ok, c2)
 	}
 
+	// PPP frame wrapping IPv4 (0xff 0x03 0x00 0x21)
+	ppp := make([]byte, 4+len(rawIP))
+	ppp[0] = 0xff
+	ppp[1] = 0x03
+	binary.BigEndian.PutUint16(ppp[2:4], 0x0021)
+	copy(ppp[4:], rawIP)
+	c3, ok := parseTCPPayload(ppp, arphrdPPP)
+	if !ok || c3.Flow != c.Flow || c3.Seq != c.Seq || c3.Data != c.Data {
+		t.Fatalf("expected PPP packet to parse, got ok=%v chunk=%+v", ok, c3)
+	}
+
 	// Empty-payload ACK should be ignored
 	ack := buildIPv4TCPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 2}, 443, 51000, 1, nil)
 	if _, ok := parseTCPPayload(ack, arphrdNone); ok {
@@ -56,53 +67,49 @@ func TestParseTCPPayloadL3AndL2(t *testing.T) {
 	}
 }
 
-func TestResolveCaptureRange(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/config" || r.Header.Get("X-Ingest-Key") != "secret-key" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"sport_min":4000,"sport_max":4099}`))
-	}))
-	defer srv.Close()
+func TestUDPPacketSource(t *testing.T) {
+	src, err := OpenUDPPacketSource("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("OpenUDPPacketSource failed: %v", err)
+	}
+	defer src.Close()
 
-	// Default (no key) -> generic 0-65535
-	min, max, err := resolveCaptureRange(srv.URL, "", false, -1, -1)
-	if err != nil || min != 0 || max != 65535 {
-		t.Fatalf("expected generic 0-65535, got %d-%d (err=%v)", min, max, err)
+	sender, err := net.Dial("udp", src.conn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("UDP dial failed: %v", err)
+	}
+	defer sender.Close()
+
+	rawIP := buildIPv4TCPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 2}, 8585, 51000, 42, []byte("world"))
+	if _, err := sender.Write(rawIP); err != nil {
+		t.Fatalf("UDP write failed: %v", err)
 	}
 
-	// Authenticated (valid key) -> fetched 4000-4099
-	min, max, err = resolveCaptureRange(srv.URL, "secret-key", false, -1, -1)
-	if err != nil || min != 4000 || max != 4099 {
-		t.Fatalf("expected authenticated 4000-4099, got %d-%d (err=%v)", min, max, err)
+	buf := make([]byte, 2048)
+	pkt, hatype, err := src.ReadPacket(buf)
+	if err != nil {
+		t.Fatalf("ReadPacket failed: %v", err)
 	}
-
-	// --generic overrides key
-	min, max, err = resolveCaptureRange(srv.URL, "secret-key", true, -1, -1)
-	if err != nil || min != 0 || max != 65535 {
-		t.Fatalf("expected --generic 0-65535, got %d-%d (err=%v)", min, max, err)
-	}
-
-	// Explicit flags override everything
-	min, max, err = resolveCaptureRange(srv.URL, "secret-key", false, 9000, 9010)
-	if err != nil || min != 9000 || max != 9010 {
-		t.Fatalf("expected explicit 9000-9010, got %d-%d (err=%v)", min, max, err)
-	}
-
-	// Invalid port range fails closed
-	if _, _, err := resolveCaptureRange(srv.URL, "", false, 5000, 4000); err == nil {
-		t.Fatal("expected error for inverted port range")
+	c, ok := parseTCPPayload(pkt, hatype)
+	if !ok || c.Sport != 8585 {
+		t.Fatalf("expected UDP packet to parse, got ok=%v chunk=%+v", ok, c)
 	}
 }
 
-func TestNewForwarderSetsInstanceHeader(t *testing.T) {
-	f := NewForwarder(nil, "https://example.workers.dev", "my-room", "k", 0, 65535)
-	if f.headers["X-Ingest-Instance"] == "" {
-		t.Fatal("expected non-empty X-Ingest-Instance header")
+func TestPhysicalNICDialerBinding(t *testing.T) {
+	d := NewPhysicalNICDialer("192.168.1.50", 5*time.Second)
+	tcpAddr, ok := d.LocalAddr.(*net.TCPAddr)
+	if !ok || tcpAddr.IP.String() != "192.168.1.50" {
+		t.Fatalf("expected LocalAddr bound to 192.168.1.50, got %+v", d.LocalAddr)
 	}
-	if f.headers["X-Ingest-Key"] != "k" {
-		t.Fatalf("expected X-Ingest-Key header, got %q", f.headers["X-Ingest-Key"])
+}
+
+func TestValidatePortRange(t *testing.T) {
+	min, max, err := validatePortRange(8484, 8999)
+	if err != nil || min != 8484 || max != 8999 {
+		t.Fatalf("expected valid 8484-8999, got %d-%d (err=%v)", min, max, err)
+	}
+	if _, _, err := validatePortRange(9000, 8000); err == nil {
+		t.Fatal("expected error for inverted port range")
 	}
 }

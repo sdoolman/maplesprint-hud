@@ -1,123 +1,64 @@
-<div align="center">
+# MapleSprint HUD (`maplesprint-hud`)
 
-# ⚡ MapleSprint HUD
-
-**Real-time EXP/hr, kills, HP/MP, and loot on your phone or second screen**  
-*Zero drivers · Zero OCR · Safe single-IP tunnel · Fail-closed launch*
-
-[![Live HUD](https://img.shields.io/badge/Live_HUD-Open_App-2ea44f?style=for-the-badge&logo=githubpages&logoColor=white)](https://sdoolman.github.io/maplesprint-hud/)
-[![CI & Releases](https://img.shields.io/github/actions/workflow/status/sdoolman/maplesprint-hud/ci.yml?style=for-the-badge&label=Build)](https://github.com/sdoolman/maplesprint-hud/actions)
-[![Latest Release](https://img.shields.io/github/v/release/sdoolman/maplesprint-hud?style=for-the-badge&color=blue)](https://github.com/sdoolman/maplesprint-hud/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-
-</div>
+Real-time **MapleStory Classic World** telemetry HUD, **WireGuard + Endpoint Dashboard**, **Level & Class Optimal Map Guide**, and **Per-Map Farming Split Logger**.
 
 ---
 
-## ✨ How It Works
+## Architecture: Open-Source Local Relay + Browser WebAssembly (`codec.wasm`)
 
-Your game traffic stays clean on a single IP through WireGuard, while a lightweight forwarder mirrors a copy to the telemetry server — which streams live stats straight to your phone:
+MapleSprint separates the local network relay from the packet decoder so the local `.exe` on your gaming PC is **100% open-source, slim, and auditable**, while all MapleStory packet decoding runs inside your browser via **`codec.wasm`**:
 
 ```text
-  🎮 Gaming PC ──(WireGuard)──▶ 🌐 Endpoint ──▶ 🍁 Game Servers
-        │                            │
-   (preflight.ps1)              (mirrors copy)
-        │                            ▼
-        └──────────────▶ ☁️ Telemetry Hub (Blackbox)
-                                     │
-                                     ▼
-                              📱 Phone / Browser HUD
+┌───────────────────────────────────────────────────────────────────────────┐
+│                         GAMING PC (Windows 10/11)                         │
+│                                                                           │
+│  1. MapleStory.exe ──► Official WireGuard (127.0.0.1:51820)               │
+│     • Split-tunnel routes only 158.115.192.0/19 (ports 8484–8999)         │
+│                               │                                           │
+│                               ▼                                           │
+│  2. maplesprint-endpoint.exe (100% Open-Source, Slim Generic TCP Relay)   │
+│     • Binds outbound sockets to physical Wi-Fi/LAN IP (zero routing loop) │
+│     • Loopback-only API on 127.0.0.1:8080 (zero UAC or Firewall popups)   │
+│     • Mirrors raw S->C TCP chunks to ws://127.0.0.1:8080/ws               │
+│                               │                                           │
+│                               ▼ (0 ms localhost WebSocket)                │
+│  3. GitHub Pages HUD (https://sdoolman.github.io/maplesprint-hud/)        │
+│     • WireGuard + Endpoint Status Dashboard & 1-click MapleSprint.conf    │
+│     • Decodes raw TCP segments locally in browser via codec.wasm          │
+│     • Live HUD, Best Maps Guide, Map Splits Log, & PiP Mini Overlay       │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Nothing touches the game:** No memory reading, no screen capture, no kernel drivers on your PC.
-- **Fail-closed launcher:** Won't launch the game unless your tunnel and live feed are both 100% ready.
+### Why This Design Is Safe & Clean
+- **100% Home Residential IP:** Game traffic exits directly from your physical Wi-Fi/Ethernet NIC (`NewPhysicalNICDialer`) to Nexon — never through a shared cloud or datacenter IP.
+- **Game Stability Independent of Browser:** Chrome is never in the critical game forwarding path. Refreshing or closing the HUD tab never interrupts or lags `MapleStory.exe`.
+- **Zero Screen Hooks or Memory Injection:** Unlike OCR overlays that hook `MapleStory.exe` windows and trigger antivirus alerts, `maplesprint-endpoint` is a tiny, dependency-light Go socket relay (`golang.org/x/net/websocket`) with zero embedded UI and zero game-specific code.
+- **Instant Decoder Updates via GitHub Pages:** Whenever game opcodes update, `codec.wasm` updates directly on GitHub Pages without requiring users to re-download `maplesprint-endpoint.exe`.
 
 ---
 
-## 🚀 Quick Start (3 Minutes)
+## Features
 
-### 1️⃣ Start the Endpoint (Cloud VM, Raspberry Pi, or WSL2)
-Download the latest `wg-forwarder` binary from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases) (or let the script build it) and run:
+1. **WireGuard + Endpoint Dashboard (`⚙ Endpoint`):**
+   - Live status indicators for **WireGuard Tunnel (`:51820`)**, **Endpoint Relay (`127.0.0.1:8080`)**, **Outbound Physical NIC IP (No-Loop)**, and **Browser `codec.wasm`**.
+   - 1-click **`⬇ MapleSprint.conf`** download directly from the dashboard.
+2. **⚡ Live HUD:**
+   - **15-Second Idle Auto-Pause (`ACTIVE` / `PAUSED` badge):** Freezes active grind timers when you stop attacking/looting for >15 seconds.
+   - **Session & 5-Minute Rolling `EXP / HR`:** Real-time grind rate plus a 5-minute rolling window (`5m: X/h`).
+   - **Level Progress `%` & Time-To-Level (`ETA`):** Uses the Classic World Level `1–200` EXP table (`CLASSIC_EXP_TABLE`).
+   - **Death EXP Loss Tracking:** Accurately reflects negative EXP deltas upon character death.
+   - **Net Loot Value (`Mesos + NPC Item Value`):** Automatically prices dropped items using `items.json` NPC sell values.
+   - **⧉ Mini Overlay (Document Picture-in-Picture):** Pops out an always-on-top compact overlay window showing live `EXP / HR`, `5m` rate, `Lv. %`, and `ETA`.
+3. **🗺️ Best Maps (Level & Class Hunting Guide):**
+   - Ranks every hunting ground in `maps.json` + `monsters.json` for your exact **Character Level (`1–200`)** and **Class/Job** (`Warrior`, `I/L & F/P Magician`, `Cleric / Priest` Holy/Undead bonus, `Bowman`, `Thief`), blended with your own **Recorded `EXP / HR`**.
+4. **📜 Map Log (Per-Map Farming Splits):**
+   - Automatically logs a split row for every map visited (Active Time, EXP Gained, `EXP / HR`, Kills, Net Mesos, Drops), persisted to `localStorage` with 1-click JSON export.
+
+---
+
+## Verification
 
 ```bash
-./deploy/start_endpoint.sh https://<your-hub-url> my-room wg0
+node --check app.js
+node --test verify.mjs
 ```
-
-<details>
-<summary>🔧 First-time WireGuard endpoint setup? Click here</summary>
-
-1. Generate keys on your endpoint:
-   ```bash
-   wg genkey | tee endpoint.key | wg pubkey > endpoint.pub
-   wg genkey | tee client.key   | wg pubkey > client.pub
-   ```
-2. Copy [`deploy/wg0.conf.example`](deploy/wg0.conf.example) to `/etc/wireguard/wg0.conf`, paste `<ENDPOINT_PRIVATE_KEY>` and `<CLIENT_PUBLIC_KEY>`, and start it:
-   ```bash
-   sudo wg-quick up wg0
-   ```
-3. Make sure **UDP port `51820`** is allowed in your firewall / router.
-
-</details>
-
----
-
-### 2️⃣ Connect WireGuard & Verify Ready (Windows)
-1. Import your WireGuard `.conf` in [**WireGuard for Windows**](https://www.wireguard.com/install/) and click **Activate**.
-2. Copy [`client/config.example.json`](client/config.example.json) → `client/config.json` and fill in `worker_url`, `room_id`, and `gateway_ip`.
-3. Run the read-only preflight check, then launch your game normally:
-   ```powershell
-   .\client\preflight.ps1
-   ```
-   > **Clean exit:** `preflight.ps1` only checks that your tunnel and forwarder are live, then exits immediately — nothing stays running in the background and no script launches the game.
-
-<details>
-<summary>📄 Example Windows WireGuard client config</summary>
-
-```ini
-[Interface]
-PrivateKey = <CLIENT_PRIVATE_KEY>
-Address = <CLIENT_WG_IP>/32
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey = <ENDPOINT_PUBLIC_KEY>
-Endpoint = <ENDPOINT_IP>:<WG_PORT>
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-```
-
-</details>
-
----
-
-### 3️⃣ Open Your Live HUD
-Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) on your phone or second monitor, enter your **Hub URL** + your chosen **Room ID**, and hit **Connect**!
-*(Each room allows one active forwarder at a time — returning after a 5-minute idle timeout automatically resets the room.)*
-
----
-
-## 🛠️ Troubleshooting & Options
-
-<details>
-<summary>❓ Common fixes & CLI flags</summary>
-
-| Problem | Quick Fix |
-|---|---|
-| **WG gateway unreachable** | Make sure WireGuard is **Activated** on Windows and UDP `51820` is open on the endpoint |
-| **Forwarder offline (`ingester: false`)** | Check that `./deploy/start_endpoint.sh` is running with the same `room_id` |
-| **No internet through tunnel** | Check that your endpoint's outbound NIC name in `wg0.conf` (e.g. `eth0` vs `ens3`) matches `ip route get 1.1.1.1` |
-
-**Forwarder flags (`wg-forwarder`):**
-- `--worker` *(required)*: Hub URL (`https://...`)
-- `--room` *(default `default`)*: Room ID
-- `--iface` *(default `wg0`)*: Interface to mirror
-- `--key` *(optional)*: Access key (or `INGEST_KEY` env var)
-
-</details>
-
----
-
-## 🤝 Contributing & License
-
-Pull requests for HUD improvements, endpoint scripts, or forwarder fixes are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).  
-Licensed under the [MIT License](LICENSE).

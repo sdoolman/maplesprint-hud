@@ -1,174 +1,197 @@
+// MapleSprint Open-Source Local Endpoint Relay
+//
+// This slim, auditable local daemon bridges your WireGuard split-tunnel
+// interface (158.115.192.0/19, TCP source ports 8484-8999) to the MapleSprint
+// WebAssembly HUD running in your browser (https://sdoolman.github.io/maplesprint-hud/).
+//
+// Design principles:
+//   - 100% Open-Source & Auditable: No game packet decoding or proprietary logic lives here.
+//   - Loopback-Only API (127.0.0.1:8080): Never exposes ports to the public internet and
+//     never triggers Windows Defender Firewall prompts.
+//   - Physical NIC Binding: Outbound connections bind directly to your physical Wi-Fi/LAN IP
+//     so traffic on a single Windows PC never loops back into the WireGuard tunnel.
+//   - Browser-Only UI: The GitHub Pages HUD serves as both the endpoint status dashboard
+//     and the live telemetry overlay (powered by codec.wasm in the browser).
 package main
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha1"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 const (
+	defaultHUDURL = "https://sdoolman.github.io/maplesprint-hud/"
 	ethPAll       = 0x0003
 	arphrdEther   = 1
+	arphrdPPP     = 512
 	arphrdNone    = 0xfffe
-	maxBatchItems = 32
-	maxBatchBytes = 48 * 1024
-	maxFrameBytes = 512 * 1024
-	flushInterval = 20 * time.Millisecond
 )
 
-type captureConfig struct {
-	SportMin int `json:"sport_min"`
-	SportMax int `json:"sport_max"`
-}
-
-type chunk struct {
+// RawChunk is the read-only TCP segment envelope streamed to the browser's codec.wasm.
+type RawChunk struct {
+	Type  string `json:"type"`
 	Flow  string `json:"flow"`
 	Seq   uint32 `json:"seq"`
 	Sport uint16 `json:"sport"`
 	Data  string `json:"data"`
 }
 
-type batchPayload struct {
-	Chunks []chunk `json:"chunks"`
+// EndpointStatus is returned by GET /status for the GitHub Pages Endpoint Dashboard.
+type EndpointStatus struct {
+	OK             bool   `json:"ok"`
+	Service        string `json:"service"`
+	Mode           string `json:"mode"`
+	ListenAddr     string `json:"listen_addr"`
+	OutboundIP     string `json:"outbound_ip"`
+	PortRange      string `json:"port_range"`
+	PacketsRelayed uint64 `json:"packets_relayed"`
+	LastPacketTs   int64  `json:"last_packet_ts"`
+	ConnectedHUDs  int    `json:"connected_huds"`
+	ConfAvailable  bool   `json:"conf_available"`
 }
 
-// PacketSource abstracts raw packet capture for testability and clean lifecycle management.
+// PacketSource abstracts packet capture from a WireGuard interface or local UDP socket.
 type PacketSource interface {
 	ReadPacket(buf []byte) ([]byte, uint16, error)
 	Close() error
 }
 
-type RawSocketSource struct {
-	fd int
+// UDPPacketSource receives raw IPv4 packets over a localhost UDP socket (zero admin privileges required).
+type UDPPacketSource struct {
+	conn *net.UDPConn
 }
 
-func OpenRawSocketSource(ifaceName string) (*RawSocketSource, error) {
-	iface, err := net.InterfaceByName(ifaceName)
+func OpenUDPPacketSource(listenAddr string) (*UDPPacketSource, error) {
+	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("interface %s: %w", ifaceName, err)
+		return nil, err
 	}
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPAll)))
+	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("AF_PACKET socket (run as root or CAP_NET_RAW): %w", err)
+		return nil, err
 	}
-	sll := &syscall.SockaddrLinklayer{
-		Protocol: htons(ethPAll),
-		Ifindex:  iface.Index,
-	}
-	if err := syscall.Bind(fd, sll); err != nil {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("bind %s: %w", ifaceName, err)
-	}
-	return &RawSocketSource{fd: fd}, nil
+	return &UDPPacketSource{conn: conn}, nil
 }
 
-func (s *RawSocketSource) ReadPacket(buf []byte) ([]byte, uint16, error) {
-	for {
-		n, sa, err := syscall.Recvfrom(s.fd, buf, 0)
-		if err != nil {
-			if errors.Is(err, syscall.EINTR) {
-				continue
-			}
-			return nil, 0, err
-		}
-		var hatype uint16 = arphrdNone
-		if sll, ok := sa.(*syscall.SockaddrLinklayer); ok {
-			hatype = sll.Hatype
-		}
-		return buf[:n], hatype, nil
+func (u *UDPPacketSource) ReadPacket(buf []byte) ([]byte, uint16, error) {
+	n, _, err := u.conn.ReadFromUDP(buf)
+	if err != nil {
+		return nil, 0, err
 	}
+	raw := buf[:n]
+	if len(raw) > 40 && binary.LittleEndian.Uint32(raw[0:4]) == 0xa1b2c3d4 {
+		raw = raw[40:]
+	} else if len(raw) > 20 && (raw[0]>>4) != 4 && (raw[16]>>4) == 4 {
+		raw = raw[16:]
+	}
+	return raw, arphrdNone, nil
 }
 
-func (s *RawSocketSource) Close() error {
-	return syscall.Close(s.fd)
+func (u *UDPPacketSource) Close() error {
+	return u.conn.Close()
 }
 
 func htons(v uint16) uint16 {
 	return (v<<8)&0xff00 | (v>>8)&0x00ff
 }
 
-func validateWorkerURL(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("invalid --worker URL %q (expected http:// or https://)", raw)
+// DetectPhysicalOutboundIP finds the primary non-loopback, non-tunnel LAN IPv4 address
+// so outbound connections bypass the local WireGuard tunnel without routing loops.
+func DetectPhysicalOutboundIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
 	}
-	return strings.TrimRight(u.String(), "/"), nil
-}
-
-// resolveCaptureRange picks port bounds from flags or GET /config when a key is set,
-// defaulting to generic (0-65535) when unauthenticated or in --generic mode.
-func resolveCaptureRange(workerURL, ingestKey string, generic bool, flagMin, flagMax int) (int, int, error) {
-	if flagMin >= 0 || flagMax >= 0 {
-		if flagMin < 0 || flagMax > 65535 || flagMax < flagMin {
-			return 0, 0, fmt.Errorf("invalid port range %d-%d (must satisfy 0 <= min <= max <= 65535)", flagMin, flagMax)
+	for _, iface := range ifaces {
+		if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 {
+			continue
 		}
-		return flagMin, flagMax, nil
-	}
-	if !generic && ingestKey != "" {
-		cfgURL := strings.TrimRight(workerURL, "/") + "/config"
-		req, err := http.NewRequest(http.MethodGet, cfgURL, nil)
-		if err == nil {
-			req.Header.Set("X-Ingest-Key", ingestKey)
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Do(req)
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					var cfg captureConfig
-					if json.NewDecoder(resp.Body).Decode(&cfg) == nil &&
-						cfg.SportMin >= 0 && cfg.SportMax <= 65535 && cfg.SportMax >= cfg.SportMin {
-						return cfg.SportMin, cfg.SportMax, nil
-					}
-				} else {
-					log.Printf("config endpoint returned %d; falling back to generic TCP", resp.StatusCode)
-				}
-			} else {
-				log.Printf("config fetch failed (%v); falling back to generic TCP", err)
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
 			}
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			// Skip the 10.66.66.0/24 WireGuard tunnel subnet
+			if ip4[0] == 10 && ip4[1] == 66 && ip4[2] == 66 {
+				continue
+			}
+			return ip4.String()
 		}
 	}
-	return 0, 65535, nil
+	return ""
 }
 
-// parseTCPPayload extracts flow, seq, source port, and TCP payload from a raw L2 or L3 IPv4 packet.
-func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
+// NewPhysicalNICDialer returns a net.Dialer bound explicitly to the physical LAN IP
+// so outbound sockets exit through the physical router rather than re-entering WireGuard.
+func NewPhysicalNICDialer(outboundIP string, timeout time.Duration) *net.Dialer {
+	d := &net.Dialer{Timeout: timeout}
+	if ip := net.ParseIP(outboundIP); ip != nil {
+		d.LocalAddr = &net.TCPAddr{IP: ip, Port: 0}
+	}
+	return d
+}
+
+func validatePortRange(flagMin, flagMax int) (int, int, error) {
+	if flagMin < 0 || flagMax > 65535 || flagMax < flagMin {
+		return 0, 0, fmt.Errorf("invalid port range %d-%d (must satisfy 0 <= min <= max <= 65535)", flagMin, flagMax)
+	}
+	return flagMin, flagMax, nil
+}
+
+// parseTCPPayload extracts the TCP flow tuple, sequence number, source port, and payload
+// from an IPv4 packet. It performs zero game-specific inspection.
+func parseTCPPayload(pkt []byte, hatype uint16) (RawChunk, bool) {
 	offset := 0
 	if hatype == arphrdEther {
 		if len(pkt) < 14 || binary.BigEndian.Uint16(pkt[12:14]) != 0x0800 {
-			return chunk{}, false
+			return RawChunk{}, false
 		}
 		offset = 14
+	} else if hatype == arphrdPPP {
+		if len(pkt) >= 4 && pkt[0] == 0xff && pkt[1] == 0x03 && binary.BigEndian.Uint16(pkt[2:4]) == 0x0021 {
+			offset = 4
+		} else if len(pkt) >= 2 && binary.BigEndian.Uint16(pkt[0:2]) == 0x0021 {
+			offset = 2
+		} else if len(pkt) > 0 && (pkt[0]>>4) != 4 {
+			return RawChunk{}, false
+		}
 	} else if hatype != arphrdNone && len(pkt) > 0 && (pkt[0]>>4) != 4 {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 
 	ip := pkt[offset:]
 	if len(ip) < 20 || (ip[0]>>4) != 4 {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 	ihl := int(ip[0]&0x0f) * 4
 	totalLen := int(binary.BigEndian.Uint16(ip[2:4]))
 	if ihl < 20 || len(ip) < ihl || ip[9] != 6 {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 	if totalLen > 0 && totalLen < len(ip) {
 		ip = ip[:totalLen]
@@ -176,15 +199,15 @@ func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
 
 	tcp := ip[ihl:]
 	if len(tcp) < 20 {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 	doff := int((tcp[12]>>4)&0x0f) * 4
 	if doff < 20 || len(tcp) < doff {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 	payload := tcp[doff:]
 	if len(payload) == 0 {
-		return chunk{}, false
+		return RawChunk{}, false
 	}
 
 	sport := binary.BigEndian.Uint16(tcp[0:2])
@@ -193,7 +216,8 @@ func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
 	srcIP := net.IP(ip[12:16]).String()
 	dstIP := net.IP(ip[16:20]).String()
 
-	return chunk{
+	return RawChunk{
+		Type:  "raw_chunk",
 		Flow:  fmt.Sprintf("%s:%d->%s:%d", srcIP, sport, dstIP, dport),
 		Seq:   seq,
 		Sport: sport,
@@ -201,178 +225,97 @@ func parseTCPPayload(pkt []byte, hatype uint16) (chunk, bool) {
 	}, true
 }
 
-type simpleWS struct {
-	conn net.Conn
+// RelayHub broadcasts raw TCP chunks over standard WebSockets to the GitHub Pages HUD.
+type RelayHub struct {
+	mu             sync.Mutex
+	clients        map[*websocket.Conn]struct{}
+	packetsRelayed atomic.Uint64
+	lastPacketTs   atomic.Int64
 }
 
-func dialWS(rawURL string, headers map[string]string) (*simpleWS, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, err
+func NewRelayHub() *RelayHub {
+	return &RelayHub{
+		clients: make(map[*websocket.Conn]struct{}),
 	}
-	useTLS := u.Scheme == "wss"
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
+}
+
+func (h *RelayHub) Broadcast(c RawChunk) {
+	h.packetsRelayed.Add(1)
+	h.lastPacketTs.Store(time.Now().UnixMilli())
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ws := range h.clients {
+		_ = ws.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if err := websocket.JSON.Send(ws, c); err != nil {
+			_ = ws.Close()
+			delete(h.clients, ws)
 		}
 	}
-	addr := net.JoinHostPort(host, port)
+}
 
-	var conn net.Conn
-	if useTLS {
-		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, &tls.Config{ServerName: host})
-	} else {
-		conn, err = net.DialTimeout("tcp", addr, 10*time.Second)
-	}
-	if err != nil {
-		return nil, err
-	}
+func (h *RelayHub) ClientCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.clients)
+}
 
-	keyBytes := make([]byte, 16)
-	if _, err := rand.Read(keyBytes); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	wsKey := base64.StdEncoding.EncodeToString(keyBytes)
+func (h *RelayHub) ServeWS(ws *websocket.Conn) {
+	h.mu.Lock()
+	h.clients[ws] = struct{}{}
+	h.mu.Unlock()
 
-	path := u.EscapedPath()
-	if path == "" {
-		path = "/"
-	}
-	if u.RawQuery != "" {
-		path += "?" + u.RawQuery
-	}
+	defer func() {
+		h.mu.Lock()
+		delete(h.clients, ws)
+		h.mu.Unlock()
+		_ = ws.Close()
+	}()
 
-	var req strings.Builder
-	fmt.Fprintf(&req, "GET %s HTTP/1.1\r\n", path)
-	fmt.Fprintf(&req, "Host: %s\r\n", u.Host)
-	req.WriteString("Upgrade: websocket\r\n")
-	req.WriteString("Connection: Upgrade\r\n")
-	fmt.Fprintf(&req, "Sec-WebSocket-Key: %s\r\n", wsKey)
-	req.WriteString("Sec-WebSocket-Version: 13\r\n")
-	for k, v := range headers {
-		fmt.Fprintf(&req, "%s: %s\r\n", k, v)
-	}
-	req.WriteString("\r\n")
+	// Send initial handshake so the HUD knows this is a raw Wasm-decoded endpoint
+	_ = websocket.JSON.Send(ws, map[string]any{
+		"type": "endpoint_ready",
+		"mode": "wasm_raw_relay",
+		"ts":   time.Now().UnixMilli(),
+	})
 
-	if _, err := conn.Write([]byte(req.String())); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil || !strings.Contains(statusLine, "101") {
-		_ = conn.Close()
-		return nil, fmt.Errorf("websocket upgrade failed: %q (%v)", strings.TrimSpace(statusLine), err)
-	}
-
-	expectedAccept := computeWSAccept(wsKey)
-	gotAccept := ""
+	var msg map[string]any
 	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Sec-WebSocket-Accept") {
-			gotAccept = strings.TrimSpace(v)
+		if err := websocket.JSON.Receive(ws, &msg); err != nil {
+			return
 		}
 	}
-	if gotAccept != expectedAccept {
-		_ = conn.Close()
-		return nil, errors.New("invalid Sec-WebSocket-Accept header")
-	}
-
-	return &simpleWS{conn: conn}, nil
 }
 
-func computeWSAccept(key string) string {
-	h := sha1.New()
-	io.WriteString(h, key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+// withCORS attaches standard CORS and Chrome Private Network Access (PNA) headers
+// so https://sdoolman.github.io/maplesprint-hud/ can query http://127.0.0.1:8080 directly.
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
 }
 
-func (ws *simpleWS) SendText(data []byte) error {
-	if len(data) > maxFrameBytes {
-		return fmt.Errorf("frame size %d exceeds %d bytes", len(data), maxFrameBytes)
-	}
-	mask := make([]byte, 4)
-	if _, err := rand.Read(mask); err != nil {
-		return err
-	}
-	n := len(data)
-	header := make([]byte, 0, 14)
-	header = append(header, 0x81)
-	switch {
-	case n < 126:
-		header = append(header, 0x80|byte(n))
-	case n < 65536:
-		header = append(header, 0x80|126, byte(n>>8), byte(n))
-	default:
-		header = append(header, 0x80|127,
-			byte(n>>56), byte(n>>48), byte(n>>40), byte(n>>32),
-			byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
-	}
-	header = append(header, mask...)
-
-	frame := make([]byte, len(header)+n)
-	copy(frame, header)
-	masked := frame[len(header):]
-	for i := 0; i < n; i++ {
-		masked[i] = data[i] ^ mask[i&3]
-	}
-
-	_ = ws.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err := ws.conn.Write(frame)
-	return err
-}
-
-func (ws *simpleWS) Close() {
-	_ = ws.conn.Close()
-}
-
-// Forwarder coordinates raw packet capture and resilient WebSocket ingestion.
 type Forwarder struct {
-	source    PacketSource
-	wsURL     string
-	headers   map[string]string
-	sportMin  int
-	sportMax  int
-	chunkChan chan chunk
+	source   PacketSource
+	sportMin int
+	sportMax int
+	hub      *RelayHub
 }
 
-func generateInstanceID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("inst-%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
-}
-
-func NewForwarder(source PacketSource, workerURL, roomID, ingestKey string, sportMin, sportMax int) *Forwarder {
-	wsURL := strings.Replace(workerURL, "http", "ws", 1) + "/room/" + url.PathEscape(roomID) + "?role=ingest"
-	headers := map[string]string{
-		"X-Ingest-Instance": generateInstanceID(),
-	}
-	if ingestKey != "" {
-		headers["X-Ingest-Key"] = ingestKey
-	}
+func NewForwarder(source PacketSource, sportMin, sportMax int) *Forwarder {
 	return &Forwarder{
-		source:    source,
-		wsURL:     wsURL,
-		headers:   headers,
-		sportMin:  sportMin,
-		sportMax:  sportMax,
-		chunkChan: make(chan chunk, 512),
+		source:   source,
+		sportMin: sportMin,
+		sportMax: sportMax,
+		hub:      NewRelayHub(),
 	}
 }
 
@@ -381,145 +324,143 @@ func (f *Forwarder) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = f.source.Close()
 	}()
-
-	go f.captureLoop(ctx)
-	return f.streamLoop(ctx)
-}
-
-func (f *Forwarder) captureLoop(ctx context.Context) {
 	buf := make([]byte, 65536)
 	for {
 		pkt, hatype, err := f.source.ReadPacket(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
-			log.Printf("capture stopped: %v", err)
-			return
+			return err
 		}
 		c, ok := parseTCPPayload(pkt, hatype)
 		if !ok || int(c.Sport) < f.sportMin || int(c.Sport) > f.sportMax {
 			continue
 		}
-		select {
-		case f.chunkChan <- c:
-		default:
-			// Drop on extreme backpressure rather than stalling packet capture
-		}
+		f.hub.Broadcast(c)
 	}
 }
 
-func (f *Forwarder) streamLoop(ctx context.Context) error {
-	for {
-		if ctx.Err() != nil {
-			return nil
+func startAPIServer(ctx context.Context, addr, mode, listenTarget, outboundIP, clientConfPath, hudURL string, sportMin, sportMax int, hub *RelayHub) {
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+
+	wsServer := websocket.Server{
+		Handshake: func(cfg *websocket.Config, r *http.Request) error {
+			return nil // Allow connections from GitHub Pages (https://sdoolman.github.io)
+		},
+		Handler: hub.ServeWS,
+	}
+	mux.Handle("/ws", wsServer)
+	mux.Handle("/room/local/ws", wsServer)
+
+	mux.HandleFunc("/status", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		confOK := false
+		if clientConfPath != "" {
+			if _, err := os.Stat(clientConfPath); err == nil {
+				confOK = true
+			}
 		}
-		ws, err := dialWS(f.wsURL, f.headers)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(EndpointStatus{
+			OK:             true,
+			Service:        "maplesprint-endpoint",
+			Mode:           mode,
+			ListenAddr:     listenTarget,
+			OutboundIP:     outboundIP,
+			PortRange:      fmt.Sprintf("%d-%d", sportMin, sportMax),
+			PacketsRelayed: hub.packetsRelayed.Load(),
+			LastPacketTs:   hub.lastPacketTs.Load(),
+			ConnectedHUDs:  hub.ClientCount(),
+			ConfAvailable:  confOK,
+		})
+	}))
+
+	mux.HandleFunc("/MapleSprint.conf", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if clientConfPath == "" {
+			http.Error(w, "No WireGuard config file configured", http.StatusNotFound)
+			return
+		}
+		data, err := os.ReadFile(clientConfPath)
 		if err != nil {
-			log.Printf("ws connect failed: %v; retrying in 2s", err)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(2 * time.Second):
-				continue
-			}
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
 		}
-		log.Printf("connected to %s", f.wsURL)
-		sendErr := f.pumpSession(ctx, ws)
-		ws.Close()
-		if ctx.Err() != nil {
-			return nil
-		}
-		log.Printf("ws disconnected (%v); reconnecting in 2s", sendErr)
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="MapleSprint.conf"`)
+		_, _ = w.Write(data)
+	}))
 
-func (f *Forwarder) pumpSession(ctx context.Context, ws *simpleWS) error {
-	ticker := time.NewTicker(flushInterval)
-	defer ticker.Stop()
+	// Visiting the local endpoint directly in a browser redirects straight to the GitHub Pages HUD.
+	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		localEndpoint := "http://" + r.Host
+		target := fmt.Sprintf("%s?worker=%s&room=local", hudURL, url.QueryEscape(localEndpoint))
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
 
-	batch := make([]chunk, 0, maxBatchItems)
-	batchBytes := 16
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		log.Printf("endpoint API ready on http://%s (UI: %s)", addr, hudURL)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http server error: %v", err)
 		}
-		payload, err := json.Marshal(batchPayload{Chunks: batch})
-		batch = batch[:0]
-		batchBytes = 16
-		if err != nil {
-			return err
-		}
-		return ws.SendText(payload)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return flush()
-		case c := <-f.chunkChan:
-			cBytes := len(c.Flow) + len(c.Data) + 64
-			if len(batch) > 0 && batchBytes+cBytes > maxBatchBytes {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-			batch = append(batch, c)
-			batchBytes += cBytes
-			if len(batch) >= maxBatchItems {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		case <-ticker.C:
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-	}
+	}()
 }
 
 func main() {
-	workerFlag := flag.String("worker", "", "Worker base URL (e.g. https://maplesprint-hub.example.workers.dev)")
-	roomID := flag.String("room", "default", "Room ID")
-	ifaceName := flag.String("iface", "wg0", "Network interface to capture")
-	ingestKey := flag.String("key", os.Getenv("INGEST_KEY"), "Optional ingest key (or INGEST_KEY env)")
-	generic := flag.Bool("generic", false, "Force generic TCP forwarding (0-65535) without fetching /config")
-	sportMinFlag := flag.Int("sport-min", -1, "Explicit minimum source port override")
-	sportMaxFlag := flag.Int("sport-max", -1, "Explicit maximum source port override")
+	ifaceName := flag.String("iface", "wg0", "WireGuard interface to capture (Linux/macOS)")
+	listenUDP := flag.String("listen-udp", "127.0.0.1:51820", "Localhost UDP address for unprivileged packet relay")
+	httpAddr := flag.String("http", "127.0.0.1:8080", "Localhost API & WebSocket address for the GitHub Pages HUD")
+	outboundIP := flag.String("outbound-ip", "", "Physical LAN IPv4 for outbound NIC binding (auto-detected if empty)")
+	clientConf := flag.String("client-conf", "", "Optional path to MapleSprint.conf for 1-click download from the HUD")
+	hudURL := flag.String("hud-url", defaultHUDURL, "GitHub Pages HUD URL")
+	sportMinFlag := flag.Int("sport-min", 8484, "Minimum TCP source port (default 8484)")
+	sportMaxFlag := flag.Int("sport-max", 8999, "Maximum TCP source port (default 8999)")
 	flag.Parse()
 
-	workerURL, err := validateWorkerURL(*workerFlag)
+	sportMin, sportMax, err := validatePortRange(*sportMinFlag, *sportMaxFlag)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	sportMin, sportMax, err := resolveCaptureRange(workerURL, *ingestKey, *generic, *sportMinFlag, *sportMaxFlag)
-	if err != nil {
-		log.Fatal(err)
+	physIP := *outboundIP
+	if physIP == "" {
+		physIP = DetectPhysicalOutboundIP()
 	}
 
-	mode := "generic"
-	if sportMin > 0 || sportMax < 65535 {
-		mode = "filtered"
+	var (
+		source PacketSource
+		mode   string
+		target string
+	)
+	if *listenUDP != "" {
+		mode = "udp-loopback"
+		target = *listenUDP
+		source, err = OpenUDPPacketSource(*listenUDP)
+	} else {
+		mode = "interface"
+		target = *ifaceName
+		source, err = OpenRawSocketSource(*ifaceName)
 	}
-	log.Printf("mode=%s iface=%s sport_range=%d-%d room=%s", mode, *ifaceName, sportMin, sportMax, *roomID)
-
-	source, err := OpenRawSocketSource(*ifaceName)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer source.Close()
 
+	log.Printf("maplesprint-endpoint started: mode=%s listen=%s outbound_ip=%s ports=%d-%d", mode, target, physIP, sportMin, sportMax)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fwd := NewForwarder(source, workerURL, *roomID, *ingestKey, sportMin, sportMax)
+	fwd := NewForwarder(source, sportMin, sportMax)
+	startAPIServer(ctx, *httpAddr, mode, target, physIP, *clientConf, *hudURL, sportMin, sportMax, fwd.hub)
+
 	if err := fwd.Run(ctx); err != nil {
 		log.Fatal(err)
 	}

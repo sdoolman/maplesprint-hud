@@ -1,5 +1,5 @@
 {
-  "worker_url": "https://<YOUR_WORKER>.workers.dev",
-  "room_id": "<YOUR_ROOM_ID>",
-  "gateway_ip": "<WIREGUARD_GATEWAY_IP>"
+  "worker_url": "http://10.66.66.1:8080",
+  "room_id": "local",
+  "gateway_ip": "10.66.66.1"
 }
