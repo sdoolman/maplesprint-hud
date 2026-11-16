@@ -50,11 +50,10 @@ function requireEl(id) {
 }
 
 const workerInput = /** @type {HTMLInputElement} */ (requireEl("workerUrl"));
-const roomInput = /** @type {HTMLInputElement} */ (requireEl("roomId"));
+const codecInput = /** @type {HTMLInputElement} */ (requireEl("codecUrl"));
+const applyCodecBtn = /** @type {HTMLButtonElement} */ (requireEl("applyCodecBtn"));
 const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
 const dbInput = /** @type {HTMLInputElement} */ (requireEl("dbBase"));
-const configCard = requireEl("configCard");
-const toggleConfigBtn = /** @type {HTMLButtonElement} */ (requireEl("toggleConfigBtn"));
 const downloadWgConfBtn = /** @type {HTMLButtonElement} */ (requireEl("downloadWgConfBtn"));
 const wasmStatusBadge = requireEl("wasmStatusBadge");
 const wgTunnelStatus = requireEl("wgTunnelStatus");
@@ -72,9 +71,11 @@ const eventCountEl = requireEl("eventCount");
 const tabHud = requireEl("tabHud");
 const tabGuide = requireEl("tabGuide");
 const tabHistory = requireEl("tabHistory");
+const tabSetup = requireEl("tabSetup");
 const viewHud = requireEl("viewHud");
 const viewGuide = requireEl("viewGuide");
 const viewHistory = requireEl("viewHistory");
+const viewSetup = requireEl("viewSetup");
 
 const manualLevelInput = /** @type {HTMLInputElement} */ (requireEl("manualLevelInput"));
 const charJobEl = requireEl("charJob");
@@ -113,7 +114,8 @@ const clearSplitsBtn = requireEl("clearSplitsBtn");
 
 const params = new URLSearchParams(window.location.search);
 workerInput.value = params.get("worker") || localStorage.getItem("ms_worker") || DEFAULT_LOCAL_ENDPOINT;
-roomInput.value = params.get("room") || localStorage.getItem("ms_room") || "local";
+const activeRoomId = params.get("room") || "local";
+codecInput.value = params.get("codec") || localStorage.getItem("ms_codec_url") || "";
 
 const savedDb = localStorage.getItem("ms_db") || DEFAULT_DB;
 const hasPreset = Array.from(dbSourceSelect.options).some((opt) => opt.value === savedDb && opt.value !== "custom");
@@ -211,9 +213,10 @@ const codecEngine = {
 };
 
 async function initCodecWasm() {
-  const customCodec = params.get("codec") || localStorage.getItem("ms_codec_url") || "";
+  const customCodec = codecInput.value.trim() || params.get("codec") || localStorage.getItem("ms_codec_url") || "";
   if (params.get("codec")) {
     localStorage.setItem("ms_codec_url", params.get("codec") || "");
+    codecInput.value = params.get("codec") || "";
   }
 
   /** @type {Array<{ url: string, label: string }>} */
@@ -376,9 +379,14 @@ async function loadCatalog() {
   const base = getCatalogBase();
   requireEl("dbStatus").textContent = "Loading...";
   try {
+    const fetchMobFile = async () => {
+      const r1 = await fetch(base + "monsters.json");
+      if (r1.ok) return r1;
+      return fetch(base + "mobs.json");
+    };
     const [mapsR, mobsR, itemsR] = await Promise.all([
       fetch(base + "maps.json"),
-      fetch(base + "monsters.json"),
+      fetchMobFile(),
       fetch(base + "items.json"),
     ]);
     if (!mapsR.ok || !mobsR.ok || !itemsR.ok) {
@@ -1100,14 +1108,13 @@ function scheduleReconnect() {
 
 function connect() {
   const base = workerInput.value.trim().replace(/\/+$/, "");
-  const room = roomInput.value.trim() || "local";
+  const room = activeRoomId;
   if (!base) return;
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
   localStorage.setItem("ms_worker", base);
-  localStorage.setItem("ms_room", room);
   localStorage.setItem("ms_db", getCatalogBase());
 
   probeEndpointStatus();
@@ -1212,6 +1219,7 @@ function switchTab(tabName) {
     [tabHud, viewHud, "hud"],
     [tabGuide, viewGuide, "guide"],
     [tabHistory, viewHistory, "history"],
+    [tabSetup, viewSetup, "setup"],
   ]) {
     const active = key === tabName;
     btn.classList.toggle("active", active);
@@ -1224,9 +1232,11 @@ function switchTab(tabName) {
 tabHud.addEventListener("click", () => switchTab("hud"));
 tabGuide.addEventListener("click", () => switchTab("guide"));
 tabHistory.addEventListener("click", () => switchTab("history"));
+tabSetup.addEventListener("click", () => switchTab("setup"));
 
-toggleConfigBtn.addEventListener("click", () => {
-  configCard.classList.toggle("hidden");
+applyCodecBtn.addEventListener("click", () => {
+  localStorage.setItem("ms_codec_url", codecInput.value.trim());
+  initCodecWasm();
 });
 
 pipBtn.addEventListener("click", togglePipOverlay);
@@ -1287,24 +1297,6 @@ requireEl("connectBtn").addEventListener("click", () => {
   connect();
 });
 
-requireEl("shareBtn").addEventListener("click", async () => {
-  const base = workerInput.value.trim().replace(/\/+$/, "");
-  const room = roomInput.value.trim();
-  if (!base || !room) {
-    mapLine.textContent = "Enter Endpoint URL and Room ID before sharing";
-    return;
-  }
-  const shareUrl = `${window.location.origin}${window.location.pathname}?worker=${encodeURIComponent(base)}&room=${encodeURIComponent(room)}`;
-  const btn = requireEl("shareBtn");
-  try {
-    await navigator.clipboard.writeText(shareUrl);
-    btn.textContent = "Copied!";
-    window.setTimeout(() => { btn.textContent = "Share Link"; }, 1500);
-  } catch {
-    window.prompt("Copy HUD share link:", shareUrl);
-  }
-});
-
 function resetLocalState() {
   clearPendingKill();
   state.startTs = null;
@@ -1339,8 +1331,8 @@ function resetLocalState() {
 requireEl("resetBtn").addEventListener("click", async () => {
   resetLocalState();
   const base = workerInput.value.trim().replace(/\/+$/, "");
-  const room = roomInput.value.trim();
-  if (base && room) {
+  const room = activeRoomId;
+  if (base && room && room !== "local") {
     try {
       await fetch(`${base}/room/${encodeURIComponent(room)}`, { method: "DELETE" });
     } catch {}
@@ -1420,4 +1412,4 @@ setInterval(probeEndpointStatus, 5000);
 initCodecWasm();
 loadCatalog();
 probeEndpointStatus();
-if (workerInput.value.trim() && roomInput.value.trim()) connect();
+if (workerInput.value.trim()) connect();

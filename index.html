@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261115b" />
+  <link rel="stylesheet" href="style.css?v=20261116a" />
 </head>
 <body>
   <main class="wrap">
@@ -18,7 +18,6 @@
       </div>
       <div class="top-actions">
         <button id="pipBtn" class="pill wake" type="button" title="Pop out always-on-top Mini Overlay">⧉ Mini</button>
-        <button id="toggleConfigBtn" class="pill wake" type="button" title="Toggle WireGuard &amp; Endpoint Dashboard">⚙ Endpoint</button>
         <button id="wakeBtn" class="pill wake" type="button" aria-pressed="false" title="Keep screen awake">☀ Wake</button>
         <span id="statusDot" class="pill offline">OFFLINE</span>
       </div>
@@ -28,127 +27,81 @@
       <button id="tabHud" class="tab-btn active" type="button">⚡ Live HUD</button>
       <button id="tabGuide" class="tab-btn" type="button">🗺️ Best Maps</button>
       <button id="tabHistory" class="tab-btn" type="button">📜 Map Log</button>
+      <button id="tabSetup" class="tab-btn" type="button">⚙ Setup</button>
     </nav>
 
-    <!-- TAB 1: LIVE HUD -->
+    <!-- TAB 1: LIVE HUD (PURE TELEMETRY) -->
     <div id="viewHud" class="tab-view">
-      <section id="configCard" class="card config">
-        <div class="config-group">
+      <div class="hud-layout">
+        <div class="hud-main">
+          <section class="card level-card">
+            <div class="level-header">
+              <div class="level-identity">
+                <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="200" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
+                <span id="charJob" class="job-badge">Beginner</span>
+              </div>
+              <div class="level-eta">
+                <span id="levelPct" class="level-pct">0.00%</span>
+                <span id="ttl" class="eta-pill">ETA —</span>
+              </div>
+            </div>
+            <div class="progress-track">
+              <div id="levelProgressBar" class="progress-fill" style="width: 0%"></div>
+            </div>
+          </section>
+
+          <section class="grid">
+            <div class="card">
+              <div class="label-row"><div class="label">EXP / HR</div><span id="xph5m" class="mini-tag">5m: 0/h</span></div>
+              <div id="xph" class="val accent">0</div>
+              <div id="elapsed" class="sub">00:00:00 active</div>
+            </div>
+            <div class="card">
+              <div class="label">SESSION EXP</div>
+              <div id="sessionExp" class="val">0</div>
+              <div id="lastExp" class="sub">+0 last gain</div>
+            </div>
+            <div class="card">
+              <div class="label">KILLS</div>
+              <div id="kills" class="val">0</div>
+              <div id="lastMob" class="sub">No kills yet</div>
+            </div>
+            <div class="card">
+              <div class="label">KILLS / MIN</div>
+              <div id="kpm" class="val">0.0</div>
+              <div id="dpm" class="sub">0 dmg/m</div>
+            </div>
+            <div class="card">
+              <div class="label">HP</div>
+              <div id="hp" class="val hp">--</div>
+              <div id="hpSub" class="sub">0 dmg taken</div>
+            </div>
+            <div class="card">
+              <div class="label">MP</div>
+              <div id="mp" class="val mp">--</div>
+              <div id="mpSub" class="sub">Waiting for update</div>
+            </div>
+            <div class="card">
+              <div class="label-row"><div class="label">MESOS</div><span id="npcValueTag" class="mini-tag">NPC: +0</span></div>
+              <div id="mesos" class="val gold">0</div>
+              <div id="mesoSub" class="sub">0 / hr</div>
+            </div>
+            <div class="card">
+              <div class="label">DROPS</div>
+              <div id="drops" class="val accent">0</div>
+              <div id="dropSub" class="sub">No drops yet</div>
+            </div>
+          </section>
+        </div>
+
+        <aside class="card hud-side">
           <div class="label-row">
-            <div class="label">WIREGUARD + LOCAL ENDPOINT DASHBOARD</div>
-            <span id="wasmStatusBadge" class="mini-tag">CODEC: Loading...</span>
+            <div class="label">LIVE FEED</div>
+            <span id="eventCount" class="muted small">0 events</span>
           </div>
-          <div class="bridge-grid">
-            <div class="bridge-node">
-              <span class="label">1. WIREGUARD TUNNEL</span>
-              <strong id="wgTunnelStatus" class="bridge-val">Waiting (:51820)</strong>
-              <span class="sub">158.115.192.0/19 → Local</span>
-            </div>
-            <div class="bridge-node">
-              <span class="label">2. ENDPOINT RELAY (.EXE)</span>
-              <strong id="endpointStatusBadge" class="bridge-val">Probing 127.0.0.1:8080…</strong>
-              <span id="outboundIpTag" class="sub">Outbound NIC: Auto (No-Loop)</span>
-            </div>
-            <div class="bridge-node">
-              <span class="label">3. CLOUDFLARE WORKER CODEC</span>
-              <strong id="wasmNodeDetail" class="bridge-val">Loading /codec.mjs…</strong>
-              <span class="sub">Origin-Gated · 0 ms Local Run</span>
-            </div>
-          </div>
-          <div class="row-worker">
-            <input id="workerUrl" type="url" placeholder="Local Endpoint URL (default: http://127.0.0.1:8080)" />
-            <input id="roomId" type="text" placeholder="Room ID (default: local)" />
-          </div>
-          <div class="actions">
-            <button id="connectBtn" type="button">Connect Endpoint</button>
-            <button id="downloadWgConfBtn" class="btn-sec" type="button">⬇ MapleSprint.conf</button>
-            <button id="resetBtn" class="btn-sec" type="button">Reset Session</button>
-          </div>
-          <div class="share-row">
-            <span class="muted small">Open-source relay streams raw TCP segments decoded in-browser via Worker codec.</span>
-            <button id="shareBtn" class="pill wake" type="button">Share Link</button>
-          </div>
-        </div>
-
-        <div class="config-group divider">
-          <div class="label-row">
-            <div class="label">GAME DATA SOURCE (CATALOG)</div>
-            <span id="dbStatus" class="muted small">Loading...</span>
-          </div>
-          <select id="dbSource">
-            <option value="https://osmsdataexplorer.com/data/current/">OSMS Data Explorer (osmsdataexplorer.com)</option>
-            <option value="custom">Custom Catalog URL...</option>
-          </select>
-          <input id="dbBase" class="hidden" hidden type="url" placeholder="Custom catalog base URL (must serve maps.json, monsters.json, items.json)" />
-        </div>
-      </section>
-
-      <section class="card level-card">
-        <div class="level-header">
-          <div class="level-identity">
-            <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="200" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
-            <span id="charJob" class="job-badge">Beginner</span>
-          </div>
-          <div class="level-eta">
-            <span id="levelPct" class="level-pct">0.00%</span>
-            <span id="ttl" class="eta-pill">ETA —</span>
-          </div>
-        </div>
-        <div class="progress-track">
-          <div id="levelProgressBar" class="progress-fill" style="width: 0%"></div>
-        </div>
-      </section>
-
-      <section class="grid">
-        <div class="card">
-          <div class="label-row"><div class="label">EXP / HR</div><span id="xph5m" class="mini-tag">5m: 0/h</span></div>
-          <div id="xph" class="val accent">0</div>
-          <div id="elapsed" class="sub">00:00:00 active</div>
-        </div>
-        <div class="card">
-          <div class="label">SESSION EXP</div>
-          <div id="sessionExp" class="val">0</div>
-          <div id="lastExp" class="sub">+0 last gain</div>
-        </div>
-        <div class="card">
-          <div class="label">KILLS</div>
-          <div id="kills" class="val">0</div>
-          <div id="lastMob" class="sub">No kills yet</div>
-        </div>
-        <div class="card">
-          <div class="label">KILLS / MIN</div>
-          <div id="kpm" class="val">0.0</div>
-          <div id="dpm" class="sub">0 dmg/m</div>
-        </div>
-        <div class="card">
-          <div class="label">HP</div>
-          <div id="hp" class="val hp">--</div>
-          <div id="hpSub" class="sub">0 dmg taken</div>
-        </div>
-        <div class="card">
-          <div class="label">MP</div>
-          <div id="mp" class="val mp">--</div>
-          <div id="mpSub" class="sub">Waiting for update</div>
-        </div>
-        <div class="card">
-          <div class="label-row"><div class="label">MESOS</div><span id="npcValueTag" class="mini-tag">NPC: +0</span></div>
-          <div id="mesos" class="val gold">0</div>
-          <div id="mesoSub" class="sub">0 / hr</div>
-        </div>
-        <div class="card">
-          <div class="label">DROPS</div>
-          <div id="drops" class="val accent">0</div>
-          <div id="dropSub" class="sub">No drops yet</div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="label-row">
-          <div class="label">LIVE FEED</div>
-          <span id="eventCount" class="muted small">0 events</span>
-        </div>
-        <ul id="feed" class="feed"></ul>
-      </section>
+          <ul id="feed" class="feed"></ul>
+        </aside>
+      </div>
     </div>
 
     <!-- TAB 2: BEST MAPS BY LEVEL & JOB GUIDE -->
@@ -156,7 +109,7 @@
       <section class="card guide-controls">
         <div class="guide-header-text">
           <h2>Classic World — Optimal Maps by Level &amp; Class</h2>
-          <p class="muted">Ranked from OSMS catalog data by mob level window, base EXP-to-HP ratio, spawn density, class affinity, and your live recorded telemetry splits.</p>
+          <p class="muted">Ranked from catalog spawn data by mob level window, EXP-to-HP ratio, spawn density, class affinity, and your live recorded telemetry splits.</p>
         </div>
         <div class="guide-filters">
           <label class="filter-field">
@@ -198,7 +151,7 @@
         <div class="history-header">
           <div>
             <h2>Per-Map Farming Splits</h2>
-            <p class="muted">Automatically recorded on map transitions and synced with live room telemetry.</p>
+            <p class="muted">Automatically recorded on map transitions during your active session.</p>
           </div>
           <div class="top-actions">
             <button id="exportSplitsBtn" class="pill wake" type="button">⇩ Export JSON</button>
@@ -219,13 +172,73 @@
               </tr>
             </thead>
             <tbody id="splitsTableBody">
-              <tr><td colspan="7" class="empty-cell">No map splits recorded yet. Connect to a room to track map performance!</td></tr>
+              <tr><td colspan="7" class="empty-cell">No map splits recorded yet. Connect to your local endpoint to track map performance!</td></tr>
             </tbody>
           </table>
         </div>
       </section>
     </div>
+
+    <!-- TAB 4: ENDPOINT, WIREGUARD, CODEC & CATALOG SETUP -->
+    <div id="viewSetup" class="tab-view hidden">
+      <section id="configCard" class="card config">
+        <div class="config-group">
+          <div class="label-row">
+            <div class="label">WIREGUARD + LOCAL ENDPOINT BRIDGE</div>
+            <span id="wasmStatusBadge" class="mini-tag">CODEC: Loading...</span>
+          </div>
+          <div class="bridge-grid">
+            <div class="bridge-node">
+              <span class="label">1. WIREGUARD TUNNEL</span>
+              <strong id="wgTunnelStatus" class="bridge-val">Waiting (:51820)</strong>
+              <span class="sub">158.115.192.0/19 → Local</span>
+            </div>
+            <div class="bridge-node">
+              <span class="label">2. ENDPOINT RELAY (.EXE)</span>
+              <strong id="endpointStatusBadge" class="bridge-val">Probing 127.0.0.1:8080…</strong>
+              <span id="outboundIpTag" class="sub">Outbound NIC: Auto (No-Loop)</span>
+            </div>
+            <div class="bridge-node">
+              <span class="label">3. BROWSER CODEC (./codec.mjs)</span>
+              <strong id="wasmNodeDetail" class="bridge-val">Loading ./codec.mjs…</strong>
+              <span class="sub">Pages Release · BYOC Pluggable</span>
+            </div>
+          </div>
+          <div class="row-worker">
+            <input id="workerUrl" type="url" placeholder="Local Endpoint URL (default: http://127.0.0.1:8080)" />
+          </div>
+          <div class="actions">
+            <button id="connectBtn" type="button">Connect Endpoint</button>
+            <button id="downloadWgConfBtn" class="btn-sec" type="button">⬇ MapleSprint.conf</button>
+            <button id="resetBtn" class="btn-sec" type="button">Reset Session</button>
+          </div>
+        </div>
+
+        <div class="config-group divider">
+          <div class="label-row">
+            <div class="label">CUSTOM CODEC (BRING YOUR OWN CODEC)</div>
+            <span class="muted small">Optional ES module URL exporting MapleDecoder</span>
+          </div>
+          <div class="row-codec">
+            <input id="codecUrl" type="url" placeholder="Default: ./codec.mjs (or e.g. http://127.0.0.1:3000/my-codec.mjs)" />
+            <button id="applyCodecBtn" class="btn-sec" type="button">Load Codec</button>
+          </div>
+        </div>
+
+        <div class="config-group divider">
+          <div class="label-row">
+            <div class="label">GAME DATA SOURCE (CATALOG)</div>
+            <span id="dbStatus" class="muted small">Loading...</span>
+          </div>
+          <select id="dbSource">
+            <option value="https://osmsdataexplorer.com/data/current/">OSMS Data Explorer (osmsdataexplorer.com)</option>
+            <option value="custom">Custom Catalog URL (JSON: maps + monsters/mobs + items)...</option>
+          </select>
+          <input id="dbBase" class="hidden" hidden type="url" placeholder="Custom catalog base URL (serves maps.json, monsters.json or mobs.json, items.json)" />
+        </div>
+      </section>
+    </div>
   </main>
-  <script src="app.js?v=20261115b"></script>
+  <script src="app.js?v=20261116a"></script>
 </body>
 </html>

@@ -42,6 +42,10 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
     "tabHud",
     "tabGuide",
     "tabHistory",
+    "tabSetup",
+    "viewSetup",
+    "codecUrl",
+    "applyCodecBtn",
     "grindStateBadge",
     "wasmStatusBadge",
     "wgTunnelStatus",
@@ -50,7 +54,6 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
     "wasmNodeDetail",
     "downloadWgConfBtn",
     "pipBtn",
-    "toggleConfigBtn",
     "manualLevelInput",
     "charJob",
     "levelPct",
@@ -69,6 +72,9 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `Expected #${id} in index.html`);
   }
+  assert.match(css, /\.wrap\s*\{[^}]*max-width:\s*1360px/);
+  assert.match(css, /\.hud-layout\s*\{/);
+  assert.ok(!html.includes("CLOUDFLARE WORKER CODEC"), "index.html must reference Pages Release ./codec.mjs instead of Cloudflare Worker");
   assert.match(js, /CLASSIC_EXP_TABLE/);
   assert.match(js, /AUTO_PAUSE_IDLE_MS\s*=\s*15_000/);
   assert.match(js, /DEFAULT_CODEC_WORKER/);
