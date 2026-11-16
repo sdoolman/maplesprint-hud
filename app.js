@@ -979,7 +979,9 @@ function renderGuide() {
         )
         .join("");
 
-      const hsUrl = `https://global.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(m.name)}`;
+      const mapSlug = m.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const meowUrl = `https://meowdb.com/msclassic/maps/${mapSlug}`;
+      const henesysUrl = `https://henesys.gg/maps?search=${encodeURIComponent(m.name)}`;
       const sp = m.scoreParts;
       const gapLabel = sp.lvGap > 0 ? `-${sp.lvGap}` : "0 (Sweet spot)";
 
@@ -989,7 +991,8 @@ function renderGuide() {
           <div>
             <div class="guide-map-title">
               <span>#${idx + 1} · ${m.name}</span>
-              <a class="hs-link" href="${hsUrl}" target="_blank" rel="noopener noreferrer" title="Open ${m.name} on HiddenStreet">HiddenStreet ↗</a>
+              <a class="hs-link" href="${meowUrl}" target="_blank" rel="noopener noreferrer" title="View ${m.name} on MeowDB">MeowDB ↗</a>
+              <a class="hs-link" href="${henesysUrl}" target="_blank" rel="noopener noreferrer" title="Browse ${m.name} on Henesys.gg">Henesys.gg ↗</a>
             </div>
             <div class="guide-map-region">${m.street} · Avg Mob Lv. ${m.avgLevel} (${diffLabel} vs you) · ${m.totalSpawns} spawns</div>
           </div>
@@ -1028,13 +1031,15 @@ function renderSplitsTable() {
       const m = db.maps[s.map_id];
       const mapName = m ? m.name : `Map #${s.map_id}`;
       const label = m ? (m.street ? `${m.name} (${m.street})` : m.name) : `Map #${s.map_id}`;
-      const hsUrl = `https://global.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(mapName)}`;
+      const mapSlug = mapName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const meowUrl = `https://meowdb.com/msclassic/maps/${mapSlug}`;
+      const henesysUrl = `https://henesys.gg/maps?search=${encodeURIComponent(mapName)}`;
       const previewTip = m && Array.isArray(m.spawns) && m.spawns.length > 0
         ? `${label} — Map #${s.map_id}`
         : `Map #${s.map_id}`;
       const xph = s.active_ms >= 3000 ? Math.round((s.exp_gained * 3_600_000) / s.active_ms) : 0;
       return `<tr title="${previewTip.replace(/"/g, "&quot;")}">
-        <td><strong>${label}</strong>${s.channel != null ? ` <span class="muted">(Ch. ${s.channel})</span>` : ""} <a class="hs-link" href="${hsUrl}" target="_blank" rel="noopener noreferrer" title="Open ${mapName} on HiddenStreet">HS ↗</a></td>
+        <td><strong>${label}</strong>${s.channel != null ? ` <span class="muted">(Ch. ${s.channel})</span>` : ""} <a class="hs-link" href="${meowUrl}" target="_blank" rel="noopener noreferrer" title="View ${mapName} on MeowDB">MeowDB ↗</a> <a class="hs-link" href="${henesysUrl}" target="_blank" rel="noopener noreferrer" title="Browse ${mapName} on Henesys.gg">Henesys ↗</a></td>
         <td>${formatDuration(s.active_ms || 0)}</td>
         <td class="gold">${(s.exp_gained || 0).toLocaleString()}</td>
         <td class="accent">${xph.toLocaleString()}/h</td>
