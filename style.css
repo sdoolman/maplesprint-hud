@@ -103,7 +103,28 @@ h2 { font-size: 1rem; font-weight: 700; }
 .guide-map-region { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
 .guide-badges { display: flex; gap: 6px; flex-wrap: wrap; }
 .badge { font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-.badge.score { background: rgba(250, 204, 21, 0.14); color: var(--gold); border: 1px solid rgba(250, 204, 21, 0.35); cursor: help; }
+.score-wrap { position: relative; display: inline-block; }
+.badge.score { background: rgba(250, 204, 21, 0.14); color: var(--gold); border: 1px solid rgba(250, 204, 21, 0.35); cursor: help; display: inline-block; }
+.score-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 210px;
+  background: #14111d;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  font-size: 0.72rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.score-wrap:hover .score-popover,
+.score-wrap:focus-within .score-popover { display: block; }
+.score-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.score-row.total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; font-weight: 800; color: var(--gold); }
 .badge.recorded { background: rgba(52, 211, 153, 0.16); color: var(--ok); border: 1px solid rgba(52, 211, 153, 0.4); }
 .badge.affinity { background: rgba(192, 132, 252, 0.15); color: var(--purple); border: 1px solid rgba(192, 132, 252, 0.35); }
 .guide-mobs { display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.78rem; }

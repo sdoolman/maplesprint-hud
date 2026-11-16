@@ -892,7 +892,7 @@ function renderGuide() {
       if (!hay.includes(q)) continue;
     }
 
-    const distPenalty = Math.max(0, Math.abs(lvDiff - 1) - 3) * 12;
+    const distPenalty = Math.max(0, Math.abs(lvDiff - 1) - 1) * 8;
     const densityFactor = Math.min(35, Math.sqrt(m.totalSpawns) * 6.5);
     const expFactor = Math.log10(Math.max(10, m.avgExp)) * 22;
     const ratioFactor = Math.min(25, m.avgRatio * 45);
@@ -933,13 +933,19 @@ function renderGuide() {
 
     const recordedXph = recordedRateForMap(m.mapId);
     const score = Math.max(1, Math.round(expFactor + densityFactor + ratioFactor + classBonus - distPenalty));
-    const scoreBreakdown = `Score ${score} = EXP(${Math.round(expFactor)}) + Spawns(${Math.round(densityFactor)}) + EXP/HP(${Math.round(ratioFactor)}) + Class(${classBonus >= 0 ? "+" : ""}${classBonus}) - LvGap(${Math.round(distPenalty)})`;
+    const scoreParts = {
+      exp: Math.round(expFactor),
+      spawns: Math.round(densityFactor),
+      ratio: Math.round(ratioFactor),
+      classBonus,
+      lvGap: Math.round(distPenalty),
+    };
 
     scored.push({
       ...m,
       lvDiff,
       score,
-      scoreBreakdown,
+      scoreParts,
       recordedXph,
       affinityTags,
     });
@@ -974,10 +980,11 @@ function renderGuide() {
         .join("");
 
       const hsUrl = `https://bbb.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(m.name)}`;
-      const previewText = `${m.name} (${m.street}) — Map #${m.mapId}\nSpawns (${m.totalSpawns}): ${m.mobs.map((x) => `${x.name} Lv.${x.level} (+${x.exp} EXP, ${x.hp} HP ×${x.count})`).join(" | ")}`;
+      const sp = m.scoreParts;
+      const gapLabel = sp.lvGap > 0 ? `-${sp.lvGap}` : "0 (Sweet spot)";
 
       return `
-      <article class="guide-card" title="${previewText.replace(/"/g, "&quot;")}">
+      <article class="guide-card">
         <div class="guide-card-top">
           <div>
             <div class="guide-map-title">
@@ -989,7 +996,17 @@ function renderGuide() {
           <div class="guide-badges">
             ${recBadge}
             ${affBadges}
-            <span class="badge score" title="${m.scoreBreakdown}">Score ${m.score} ⓘ</span>
+            <div class="score-wrap" tabindex="0">
+              <span class="badge score">Score ${m.score} ⓘ</span>
+              <div class="score-popover">
+                <div class="score-row"><span>Base EXP</span><span>+${sp.exp}</span></div>
+                <div class="score-row"><span>Spawn Density</span><span>+${sp.spawns}</span></div>
+                <div class="score-row"><span>EXP / HP Ratio</span><span>+${sp.ratio}</span></div>
+                <div class="score-row"><span>Class Affinity</span><span>${sp.classBonus >= 0 ? "+" : ""}${sp.classBonus}</span></div>
+                <div class="score-row"><span>Level Gap</span><span>${gapLabel}</span></div>
+                <div class="score-row total"><span>Total Score</span><span>${m.score}</span></div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="guide-mobs">${mobsHtml}</div>
