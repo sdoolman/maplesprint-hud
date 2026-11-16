@@ -219,7 +219,7 @@ async function initCodecWasm() {
       codecEngine.decoder = new mod.MapleDecoder();
       codecEngine.ready = true;
       wasmStatusBadge.textContent = "CODEC: Ready";
-      wasmNodeDetail.textContent = cand.label;
+      wasmNodeDetail.textContent = "Ready";
       wasmNodeDetail.classList.add("online");
       return;
     } catch {
@@ -228,7 +228,7 @@ async function initCodecWasm() {
   }
 
   wasmStatusBadge.textContent = "CODEC: Standby";
-  wasmNodeDetail.textContent = "No codec.mjs loaded (?codec=)";
+  wasmNodeDetail.textContent = "Standby";
 }
 
 function base64ToBytes(b64) {
@@ -296,11 +296,11 @@ async function probeEndpointStatus() {
       connectBtn.disabled = false;
       connectBtn.textContent = "Reconnect Endpoint";
     } else {
-      endpointStatusBadge.textContent = "Offline — Start endpoint.exe";
+      endpointStatusBadge.textContent = "Offline — Start relay";
       endpointStatusBadge.classList.remove("online");
       connectBtn.disabled = true;
       connectBtn.textContent = "Endpoint Offline";
-      connectBtn.title = "Start maplesprint-endpoint.exe on 127.0.0.1:8080 first";
+      connectBtn.title = "Start the endpoint relay binary on 127.0.0.1:8080 first";
     }
   }
 }
