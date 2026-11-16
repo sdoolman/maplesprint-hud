@@ -979,9 +979,9 @@ function renderGuide() {
         )
         .join("");
 
-      const mapSlug = m.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const meowUrl = `https://meowdb.com/msclassic/maps/${mapSlug}`;
-      const henesysUrl = `https://henesys.gg/maps?search=${encodeURIComponent(m.name)}`;
+      const paddedId = String(m.mapId).padStart(9, "0");
+      const meowUrl = `https://meowdb.com/msclassic/maps/${paddedId}`;
+      const henesysUrl = `https://henesys.gg/maps/${m.mapId}`;
       const sp = m.scoreParts;
       const gapLabel = sp.lvGap > 0 ? `-${sp.lvGap}` : "0 (Sweet spot)";
 
@@ -1031,9 +1031,9 @@ function renderSplitsTable() {
       const m = db.maps[s.map_id];
       const mapName = m ? m.name : `Map #${s.map_id}`;
       const label = m ? (m.street ? `${m.name} (${m.street})` : m.name) : `Map #${s.map_id}`;
-      const mapSlug = mapName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const meowUrl = `https://meowdb.com/msclassic/maps/${mapSlug}`;
-      const henesysUrl = `https://henesys.gg/maps?search=${encodeURIComponent(mapName)}`;
+      const paddedId = String(s.map_id).padStart(9, "0");
+      const meowUrl = `https://meowdb.com/msclassic/maps/${paddedId}`;
+      const henesysUrl = `https://henesys.gg/maps/${s.map_id}`;
       const previewTip = m && Array.isArray(m.spawns) && m.spawns.length > 0
         ? `${label} — Map #${s.map_id}`
         : `Map #${s.map_id}`;
