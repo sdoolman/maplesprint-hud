@@ -979,7 +979,7 @@ function renderGuide() {
         )
         .join("");
 
-      const hsUrl = `https://bbb.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(m.name)}`;
+      const hsUrl = `https://global.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(m.name)}`;
       const sp = m.scoreParts;
       const gapLabel = sp.lvGap > 0 ? `-${sp.lvGap}` : "0 (Sweet spot)";
 
@@ -1028,7 +1028,7 @@ function renderSplitsTable() {
       const m = db.maps[s.map_id];
       const mapName = m ? m.name : `Map #${s.map_id}`;
       const label = m ? (m.street ? `${m.name} (${m.street})` : m.name) : `Map #${s.map_id}`;
-      const hsUrl = `https://bbb.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(mapName)}`;
+      const hsUrl = `https://global.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(mapName)}`;
       const previewTip = m && Array.isArray(m.spawns) && m.spawns.length > 0
         ? `${label} — Map #${s.map_id}`
         : `Map #${s.map_id}`;
