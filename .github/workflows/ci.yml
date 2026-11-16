@@ -1,4 +1,4 @@
-name: CI & Release
+name: CI, Release & Pages
 
 on:
   push:
@@ -6,9 +6,14 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  repository_dispatch:
+    types: [codec-updated]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   forwarder-go:
@@ -52,7 +57,41 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Syntax & Wasm HUD verification
+      - name: Syntax & HUD verification
         run: |
           node --check app.js
           node --test verify.mjs
+
+  deploy-pages:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
+    needs: [hud-check]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage static HUD files into _site
+        run: |
+          mkdir -p _site
+          cp index.html app.js style.css _site/
+          if [ -d data ]; then cp -r data _site/; fi
+      - name: Pull pre-built codec.mjs release artifact from maple-collector
+        env:
+          GH_TOKEN: ${{ secrets.COLLECTOR_RELEASE_TOKEN }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            gh release download latest --repo sdoolman/maple-collector --pattern "codec.mjs" --dir _site --clobber
+            ls -lh _site/codec.mjs
+          else
+            echo "COLLECTOR_RELEASE_TOKEN not set; skipping private release asset pull"
+          fi
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

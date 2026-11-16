@@ -201,7 +201,7 @@ manualLevelInput.value = String(state.level);
 guideLevelInput.value = String(state.level > 1 ? state.level : 25);
 
 // ============================================================================
-// Private Cloudflare Worker Codec Loader (/codec.mjs)
+// Pluggable Codec Loader (GitHub Pages Release Artifact ./codec.mjs or Custom BYOC)
 // ============================================================================
 
 const codecEngine = {
@@ -211,26 +211,40 @@ const codecEngine = {
 };
 
 async function initCodecWasm() {
-  const codecBase = (
-    params.get("codec") ||
-    localStorage.getItem("ms_codec_worker") ||
-    DEFAULT_CODEC_WORKER
-  ).replace(/\/+$/, "");
-
-  try {
-    const mod = await import(`${codecBase}/codec.mjs`);
-    if (typeof mod.MapleDecoder !== "function") {
-      throw new Error("Invalid codec module");
-    }
-    codecEngine.decoder = new mod.MapleDecoder();
-    codecEngine.ready = true;
-    wasmStatusBadge.textContent = "CODEC: Ready";
-    wasmNodeDetail.textContent = "Worker Codec (Active)";
-    wasmNodeDetail.classList.add("online");
-  } catch {
-    wasmStatusBadge.textContent = "CODEC: Standby";
-    wasmNodeDetail.textContent = "Worker /codec.mjs";
+  const customCodec = params.get("codec") || localStorage.getItem("ms_codec_url") || "";
+  if (params.get("codec")) {
+    localStorage.setItem("ms_codec_url", params.get("codec") || "");
   }
+
+  /** @type {Array<{ url: string, label: string }>} */
+  const candidates = [];
+  if (customCodec.trim()) {
+    const clean = customCodec.trim();
+    const resolved = clean.endsWith(".mjs") || clean.endsWith(".js") ? clean : `${clean.replace(/\/+$/, "")}/codec.mjs`;
+    candidates.push({ url: resolved, label: "Custom Codec (BYOC)" });
+  }
+  candidates.push(
+    { url: new URL("./codec.mjs", window.location.href).href, label: "Pages Release Codec (Active)" },
+    { url: `${DEFAULT_CODEC_WORKER.replace(/\/+$/, "")}/codec.mjs`, label: "Fallback Codec (Active)" }
+  );
+
+  for (const cand of candidates) {
+    try {
+      const mod = await import(cand.url);
+      if (typeof mod.MapleDecoder !== "function") continue;
+      codecEngine.decoder = new mod.MapleDecoder();
+      codecEngine.ready = true;
+      wasmStatusBadge.textContent = "CODEC: Ready";
+      wasmNodeDetail.textContent = cand.label;
+      wasmNodeDetail.classList.add("online");
+      return;
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  wasmStatusBadge.textContent = "CODEC: Standby";
+  wasmNodeDetail.textContent = "No codec.mjs loaded (?codec=)";
 }
 
 function base64ToBytes(b64) {

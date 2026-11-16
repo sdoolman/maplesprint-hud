@@ -3,3 +3,6 @@ __pycache__/
 .env
 
 forwarder/wg-forwarder
+codec.mjs
+_site/
+dist/
