@@ -208,20 +208,9 @@
             <input id="workerUrl" type="url" placeholder="Local Endpoint URL (default: http://127.0.0.1:8080)" />
           </div>
           <div class="actions">
-            <button id="connectBtn" type="button">Connect Endpoint</button>
+            <button id="connectBtn" type="button" disabled title="Waiting for local endpoint relay at 127.0.0.1:8080">Endpoint Offline</button>
             <button id="downloadWgConfBtn" class="btn-sec" type="button">⬇ MapleSprint.conf</button>
             <button id="resetBtn" class="btn-sec" type="button">Reset Session</button>
-          </div>
-        </div>
-
-        <div class="config-group divider">
-          <div class="label-row">
-            <div class="label">CUSTOM CODEC (BRING YOUR OWN CODEC)</div>
-            <span class="muted small">Optional ES module URL exporting MapleDecoder</span>
-          </div>
-          <div class="row-codec">
-            <input id="codecUrl" type="url" placeholder="Default: ./codec.mjs (or e.g. http://127.0.0.1:3000/my-codec.mjs)" />
-            <button id="applyCodecBtn" class="btn-sec" type="button">Load Codec</button>
           </div>
         </div>
 
@@ -232,9 +221,7 @@
           </div>
           <select id="dbSource">
             <option value="https://osmsdataexplorer.com/data/current/">OSMS Data Explorer (osmsdataexplorer.com)</option>
-            <option value="custom">Custom Catalog URL (JSON: maps + monsters/mobs + items)...</option>
           </select>
-          <input id="dbBase" class="hidden" hidden type="url" placeholder="Custom catalog base URL (serves maps.json, monsters.json or mobs.json, items.json)" />
         </div>
       </section>
     </div>

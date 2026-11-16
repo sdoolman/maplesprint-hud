@@ -50,10 +50,8 @@ function requireEl(id) {
 }
 
 const workerInput = /** @type {HTMLInputElement} */ (requireEl("workerUrl"));
-const codecInput = /** @type {HTMLInputElement} */ (requireEl("codecUrl"));
-const applyCodecBtn = /** @type {HTMLButtonElement} */ (requireEl("applyCodecBtn"));
+const connectBtn = /** @type {HTMLButtonElement} */ (requireEl("connectBtn"));
 const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
-const dbInput = /** @type {HTMLInputElement} */ (requireEl("dbBase"));
 const downloadWgConfBtn = /** @type {HTMLButtonElement} */ (requireEl("downloadWgConfBtn"));
 const wasmStatusBadge = requireEl("wasmStatusBadge");
 const wgTunnelStatus = requireEl("wgTunnelStatus");
@@ -115,26 +113,10 @@ const clearSplitsBtn = requireEl("clearSplitsBtn");
 const params = new URLSearchParams(window.location.search);
 workerInput.value = params.get("worker") || localStorage.getItem("ms_worker") || DEFAULT_LOCAL_ENDPOINT;
 const activeRoomId = params.get("room") || "local";
-codecInput.value = params.get("codec") || localStorage.getItem("ms_codec_url") || "";
-
-const savedDb = localStorage.getItem("ms_db") || DEFAULT_DB;
-const hasPreset = Array.from(dbSourceSelect.options).some((opt) => opt.value === savedDb && opt.value !== "custom");
-if (hasPreset) {
-  dbSourceSelect.value = savedDb;
-  dbInput.value = savedDb;
-  dbInput.hidden = true;
-  dbInput.classList.add("hidden");
-} else {
-  dbSourceSelect.value = "custom";
-  dbInput.value = savedDb;
-  dbInput.hidden = false;
-  dbInput.classList.remove("hidden");
-}
 
 /** @returns {string} */
 function getCatalogBase() {
-  const raw = dbSourceSelect.value === "custom" ? dbInput.value.trim() : dbSourceSelect.value;
-  return (raw || DEFAULT_DB).replace(/\/+$/, "") + "/";
+  return (dbSourceSelect.value || DEFAULT_DB).replace(/\/+$/, "") + "/";
 }
 
 function loadSavedSplits() {
@@ -213,10 +195,9 @@ const codecEngine = {
 };
 
 async function initCodecWasm() {
-  const customCodec = codecInput.value.trim() || params.get("codec") || localStorage.getItem("ms_codec_url") || "";
+  const customCodec = params.get("codec") || localStorage.getItem("ms_codec_url") || "";
   if (params.get("codec")) {
     localStorage.setItem("ms_codec_url", params.get("codec") || "");
-    codecInput.value = params.get("codec") || "";
   }
 
   /** @type {Array<{ url: string, label: string }>} */
@@ -287,13 +268,20 @@ function ingestRawChunkWasm(flow, seq, b64Data) {
 
 async function probeEndpointStatus() {
   const base = workerInput.value.trim().replace(/\/+$/, "");
-  if (!base) return;
+  if (!base) {
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Enter Endpoint URL";
+    return;
+  }
   try {
     const res = await fetch(`${base}/status`, { cache: "no-store" });
     if (!res.ok) throw new Error("Status unavailable");
     const st = await res.json();
     endpointStatusBadge.textContent = `ONLINE (${st.mode || "relay"})`;
     endpointStatusBadge.classList.add("online");
+    connectBtn.disabled = false;
+    connectBtn.textContent = ws && ws.readyState === WebSocket.OPEN ? "Reconnect Endpoint" : "Connect Endpoint";
+    connectBtn.title = "Connect to local endpoint WebSocket";
     if (st.outbound_ip) {
       outboundIpTag.textContent = `Outbound NIC: ${st.outbound_ip} (No-Loop)`;
     }
@@ -305,9 +293,14 @@ async function probeEndpointStatus() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       endpointStatusBadge.textContent = "Connected (Remote / Worker)";
       endpointStatusBadge.classList.add("online");
+      connectBtn.disabled = false;
+      connectBtn.textContent = "Reconnect Endpoint";
     } else {
       endpointStatusBadge.textContent = "Offline — Start endpoint.exe";
       endpointStatusBadge.classList.remove("online");
+      connectBtn.disabled = true;
+      connectBtn.textContent = "Endpoint Offline";
+      connectBtn.title = "Start maplesprint-endpoint.exe on 127.0.0.1:8080 first";
     }
   }
 }
@@ -940,11 +933,13 @@ function renderGuide() {
 
     const recordedXph = recordedRateForMap(m.mapId);
     const score = Math.max(1, Math.round(expFactor + densityFactor + ratioFactor + classBonus - distPenalty));
+    const scoreBreakdown = `Score ${score} = EXP(${Math.round(expFactor)}) + Spawns(${Math.round(densityFactor)}) + EXP/HP(${Math.round(ratioFactor)}) + Class(${classBonus >= 0 ? "+" : ""}${classBonus}) - LvGap(${Math.round(distPenalty)})`;
 
     scored.push({
       ...m,
       lvDiff,
       score,
+      scoreBreakdown,
       recordedXph,
       affinityTags,
     });
@@ -978,17 +973,23 @@ function renderGuide() {
         )
         .join("");
 
+      const hsUrl = `https://bbb.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(m.name)}`;
+      const previewText = `${m.name} (${m.street}) — Map #${m.mapId}\nSpawns (${m.totalSpawns}): ${m.mobs.map((x) => `${x.name} Lv.${x.level} (+${x.exp} EXP, ${x.hp} HP ×${x.count})`).join(" | ")}`;
+
       return `
-      <article class="guide-card">
+      <article class="guide-card" title="${previewText.replace(/"/g, "&quot;")}">
         <div class="guide-card-top">
           <div>
-            <div class="guide-map-title">#${idx + 1} · ${m.name}</div>
+            <div class="guide-map-title">
+              <span>#${idx + 1} · ${m.name}</span>
+              <a class="hs-link" href="${hsUrl}" target="_blank" rel="noopener noreferrer" title="Open ${m.name} on HiddenStreet">HiddenStreet ↗</a>
+            </div>
             <div class="guide-map-region">${m.street} · Avg Mob Lv. ${m.avgLevel} (${diffLabel} vs you) · ${m.totalSpawns} spawns</div>
           </div>
           <div class="guide-badges">
             ${recBadge}
             ${affBadges}
-            <span class="badge score">Score ${m.score}</span>
+            <span class="badge score" title="${m.scoreBreakdown}">Score ${m.score} ⓘ</span>
           </div>
         </div>
         <div class="guide-mobs">${mobsHtml}</div>
@@ -1008,10 +1009,15 @@ function renderSplitsTable() {
     .slice(0, 30)
     .map((s) => {
       const m = db.maps[s.map_id];
+      const mapName = m ? m.name : `Map #${s.map_id}`;
       const label = m ? (m.street ? `${m.name} (${m.street})` : m.name) : `Map #${s.map_id}`;
+      const hsUrl = `https://bbb.hidden-street.net/search_finder?search_type=map&keyword=${encodeURIComponent(mapName)}`;
+      const previewTip = m && Array.isArray(m.spawns) && m.spawns.length > 0
+        ? `${label} — Map #${s.map_id}`
+        : `Map #${s.map_id}`;
       const xph = s.active_ms >= 3000 ? Math.round((s.exp_gained * 3_600_000) / s.active_ms) : 0;
-      return `<tr>
-        <td><strong>${label}</strong>${s.channel != null ? ` <span class="muted">(Ch. ${s.channel})</span>` : ""}</td>
+      return `<tr title="${previewTip.replace(/"/g, "&quot;")}">
+        <td><strong>${label}</strong>${s.channel != null ? ` <span class="muted">(Ch. ${s.channel})</span>` : ""} <a class="hs-link" href="${hsUrl}" target="_blank" rel="noopener noreferrer" title="Open ${mapName} on HiddenStreet">HS ↗</a></td>
         <td>${formatDuration(s.active_ms || 0)}</td>
         <td class="gold">${(s.exp_gained || 0).toLocaleString()}</td>
         <td class="accent">${xph.toLocaleString()}/h</td>
@@ -1234,11 +1240,6 @@ tabGuide.addEventListener("click", () => switchTab("guide"));
 tabHistory.addEventListener("click", () => switchTab("history"));
 tabSetup.addEventListener("click", () => switchTab("setup"));
 
-applyCodecBtn.addEventListener("click", () => {
-  localStorage.setItem("ms_codec_url", codecInput.value.trim());
-  initCodecWasm();
-});
-
 pipBtn.addEventListener("click", togglePipOverlay);
 
 manualLevelInput.addEventListener("change", () => {
@@ -1272,27 +1273,11 @@ clearSplitsBtn.addEventListener("click", () => {
 });
 
 dbSourceSelect.addEventListener("change", () => {
-  if (dbSourceSelect.value === "custom") {
-    dbInput.hidden = false;
-    dbInput.classList.remove("hidden");
-    dbInput.focus();
-    return;
-  }
-  dbInput.hidden = true;
-  dbInput.classList.add("hidden");
-  dbInput.value = dbSourceSelect.value;
   localStorage.setItem("ms_db", getCatalogBase());
   loadCatalog();
 });
 
-dbInput.addEventListener("change", () => {
-  if (dbSourceSelect.value === "custom" && dbInput.value.trim()) {
-    localStorage.setItem("ms_db", getCatalogBase());
-    loadCatalog();
-  }
-});
-
-requireEl("connectBtn").addEventListener("click", () => {
+connectBtn.addEventListener("click", () => {
   if (Object.keys(db.mobs).length === 0) loadCatalog();
   connect();
 });

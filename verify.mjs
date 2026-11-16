@@ -29,12 +29,11 @@ test("all requireEl() IDs exist uniquely in index.html", () => {
   }
 });
 
-test("layout CSS and hidden custom catalog input guards", () => {
+test("layout CSS guards", () => {
   assert.match(css, /\.config\s*\{[^}]*display:\s*flex;\s*flex-direction:\s*column;/);
   assert.match(css, /\.actions\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*1fr\)/);
   assert.match(css, /\.hidden\s*\{\s*display:\s*none;\s*\}/);
   assert.match(css, /color-scheme:\s*dark;/);
-  assert.match(html, /<input\s+id="dbBase"[^>]*\bhidden\b/);
 });
 
 test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level ETA, and PiP Mini Overlay are wired", () => {
@@ -44,8 +43,7 @@ test("Endpoint Dashboard, Best Maps guide, Map Splits log, 15s Auto-Pause, Level
     "tabHistory",
     "tabSetup",
     "viewSetup",
-    "codecUrl",
-    "applyCodecBtn",
+    "connectBtn",
     "grindStateBadge",
     "wasmStatusBadge",
     "wgTunnelStatus",
