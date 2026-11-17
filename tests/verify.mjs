@@ -311,4 +311,5 @@ test("mob_kill and map-wide mob_damage do not pollute kills, lastMobId, feed, or
   assert.ok(!mainJs.includes("attack_hit("), "unattributed attack_hit must not be handled in Live Events feed");
   assert.match(html, /<select id="charJob"/, "charJob must be an editable select element");
   assert.match(mainJs, /Live stream active/, "mapLine must update when raw chunks are flowing prior to SetField");
+  assert.match(mainJs, /ev\.mob_id/, "exp_gain must consume decoder-attributed mob_id directly");
 });

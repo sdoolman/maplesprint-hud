@@ -596,10 +596,11 @@ function clearPendingKill() {
 const EVENT_HANDLERS = {
   exp_gain(ev, evTs) {
     recordActiveTime(evTs);
-    if (pendingKillMobId !== null) {
-      const mob = db.mobs[pendingKillMobId];
-      state.lastMobId = pendingKillMobId;
-      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${pendingKillMobId}`}`);
+    const mobId = typeof ev.mob_id === "number" ? ev.mob_id : pendingKillMobId;
+    if (ev.gain > 0 && mobId !== null) {
+      const mob = db.mobs[mobId];
+      state.lastMobId = mobId;
+      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${mobId}`}`);
       clearPendingKill();
     }
     state.sessionExp += ev.gain;
