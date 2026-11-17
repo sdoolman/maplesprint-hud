@@ -107,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117g", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117h", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -594,9 +594,9 @@ const EVENT_HANDLERS = {
     addFeed(`Entered ${m ? m.name : `Map #${ev.map_id}`} (Ch. ${ev.channel})`);
     renderSplitsTable();
   },
-  mob_kill(ev, evTs) {
-    recordActiveTime(evTs);
-    state.lastMobId = ev.mob_id;
+  mob_kill(ev) {
+    // Only stage the mob ID for correlation with our own subsequent exp_gain;
+    // map-wide kill events fire for other players' kills on the same map too.
     clearPendingKill();
     pendingKillMobId = ev.mob_id;
     pendingKillTimer = window.setTimeout(clearPendingKill, HUD_CONFIG.killCorrelationMs);
