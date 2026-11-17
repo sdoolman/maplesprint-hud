@@ -107,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117d", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117e", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
