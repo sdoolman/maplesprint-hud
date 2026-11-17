@@ -16,11 +16,11 @@ permissions:
   id-token: write
 
 jobs:
-  forwarder-go:
+  relay-go:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: forwarder
+        working-directory: relay
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -78,8 +78,8 @@ jobs:
           node-version: "20"
       - name: Syntax & HUD verification
         run: |
-          for f in js/*.js; do node --check "$f"; done
-          node --test verify.mjs
+          for f in web/js/*.js; do node --check "$f"; done
+          node --test tests/verify.mjs
 
   deploy-pages:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
@@ -93,8 +93,7 @@ jobs:
       - name: Stage static HUD files into _site
         run: |
           mkdir -p _site
-          cp index.html style.css pip.css _site/
-          cp -r js _site/
+          cp -r web/* _site/
           if [ -d data ]; then cp -r data _site/; fi
       - name: Pull pre-built codec.mjs release artifact from maple-collector
         env:

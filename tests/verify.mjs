@@ -3,18 +3,19 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
-import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } from "./js/catalog.js";
-import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, escapeHtml, formatCompact, formatDuration } from "./js/constants.js";
-import { sanitizeEndpointUrl } from "./js/endpoint.js";
-import { renderGuideHtml, renderSplitsHtml, scoreMap } from "./js/guide.js";
+import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } from "../web/js/catalog.js";
+import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, escapeHtml, formatCompact, formatDuration } from "../web/js/constants.js";
+import { sanitizeEndpointUrl } from "../web/js/endpoint.js";
+import { renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
 
-const rootDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-const html = readFileSync(path.join(rootDir, "index.html"), "utf8");
-const css = readFileSync(path.join(rootDir, "style.css"), "utf8");
-const mainJs = readFileSync(path.join(rootDir, "js/main.js"), "utf8");
-const jsFiles = readdirSync(path.join(rootDir, "js"))
+const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const webDir = path.join(rootDir, "web");
+const html = readFileSync(path.join(webDir, "index.html"), "utf8");
+const css = readFileSync(path.join(webDir, "css/style.css"), "utf8");
+const mainJs = readFileSync(path.join(webDir, "js/main.js"), "utf8");
+const jsFiles = readdirSync(path.join(webDir, "js"))
   .filter((f) => f.endsWith(".js"))
-  .map((f) => path.join(rootDir, "js", f));
+  .map((f) => path.join(webDir, "js", f));
 
 test("all ES modules in js/ have valid JavaScript syntax", () => {
   for (const filePath of jsFiles) {
@@ -22,12 +23,12 @@ test("all ES modules in js/ have valid JavaScript syntax", () => {
   }
 });
 
-test("index.html uses cache-busted style.css and js/main.js module", () => {
-  const cssMatch = html.match(/href="style\.css\?v=([^"]+)"/);
+test("index.html uses cache-busted css/style.css and js/main.js module", () => {
+  const cssMatch = html.match(/href="css\/style\.css\?v=([^"]+)"/);
   const jsMatch = html.match(/type="module"\s+src="js\/main\.js\?v=([^"]+)"/);
-  assert.ok(cssMatch, "style.css must include ?v= cache-buster");
+  assert.ok(cssMatch, "css/style.css must include ?v= cache-buster");
   assert.ok(jsMatch, "js/main.js must be loaded as type=module with ?v= cache-buster");
-  assert.equal(cssMatch[1], jsMatch[1], "style.css and js/main.js cache-buster versions should match");
+  assert.equal(cssMatch[1], jsMatch[1], "css/style.css and js/main.js cache-buster versions should match");
 });
 
 test("all requireEl() IDs exist uniquely in index.html", () => {
@@ -147,13 +148,13 @@ test("layout CSS guards and full-width responsive layout", () => {
 });
 
 test("public repo contains zero codec files, static ICO resource exists, safe URL validation, and zero plaintext opcodes", () => {
-  assert.ok(!existsSync(path.join(rootDir, "forwarder/codec.go")), "forwarder/codec.go must not exist in public repo");
+  assert.ok(!existsSync(path.join(rootDir, "relay/codec.go")), "relay/codec.go must not exist in public repo");
   assert.ok(!existsSync(path.join(rootDir, "codec.wasm")), "codec.wasm must not exist in public repo");
-  assert.ok(existsSync(path.join(rootDir, "forwarder/assets/maplesprint.ico")), "Windows .ico asset must exist on disk");
+  assert.ok(existsSync(path.join(rootDir, "relay/assets/maplesprint.ico")), "Windows .ico asset must exist on disk");
 
-  const mainGo = readFileSync(path.join(rootDir, "forwarder/main.go"), "utf8");
-  const packetGo = readFileSync(path.join(rootDir, "forwarder/packet.go"), "utf8");
-  const trayWinGo = readFileSync(path.join(rootDir, "forwarder/tray_windows.go"), "utf8");
+  const mainGo = readFileSync(path.join(rootDir, "relay/main.go"), "utf8");
+  const packetGo = readFileSync(path.join(rootDir, "relay/packet.go"), "utf8");
+  const trayWinGo = readFileSync(path.join(rootDir, "relay/tray_windows.go"), "utf8");
   const allCode = [...jsFiles.map((f) => readFileSync(f, "utf8")), mainGo, packetGo, trayWinGo].join("\n");
 
   for (const forbidden of [
@@ -170,5 +171,5 @@ test("public repo contains zero codec files, static ICO resource exists, safe UR
   assert.match(trayWinGo, /validateHTTPURL/);
   assert.match(trayWinGo, /validateLogPath/);
   assert.ok(!trayWinGo.includes("createMapleIcon"), "In-memory icon pixel drawing must not exist");
-  assert.ok(!mainGo.includes("<!DOCTYPE html>"), "forwarder/main.go must not embed its own HTML UI");
+  assert.ok(!mainGo.includes("<!DOCTYPE html>"), "relay/main.go must not embed its own HTML UI");
 });
