@@ -1,6 +1,6 @@
 # Contributing to MapleSprint HUD
 
-Contributions to the modular HUD (`web/`), Go relay (`relay/`), and Linux deploy scripts (`deploy/`) are welcome!
+Contributions to the modular HUD (`web/`) and Go relay (`relay/`) are welcome!
 
 ## Before Opening a PR
 1. Run local checks:

@@ -34,27 +34,11 @@ Your game traffic stays clean on your own residential IP through WireGuard, whil
 
 ## 🚀 Quick Start (3 Minutes)
 
-### 1️⃣ Start the Local Endpoint (Windows PC, Raspberry Pi, or Linux)
-Download **`maplesprint-endpoint-windows-amd64.zip`** (Windows) or **`wg-forwarder-linux-amd64`** (Linux) from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases), extract, and double-click **`maplesprint-endpoint-windows-amd64.exe`**:
+### 1️⃣ Start the Local Endpoint
+Download **`maplesprint-endpoint-windows-amd64.zip`** from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases), extract, and double-click **`maplesprint-endpoint-windows-amd64.exe`**:
 
 - Launches silently in the **Windows System Tray** (bottom-right taskbar icon) with zero console windows.
 - Automatically opens [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) in your browser (right-click the tray icon for **Open HUD**, **Open Relay Log**, or **Quit**).
-
-<details>
-<summary>🔧 Running on a separate Linux / Raspberry Pi endpoint instead? Click here</summary>
-
-1. Start the endpoint helper script (auto-generates WireGuard keys & split-tunnel config on first run):
-   ```bash
-   ./deploy/start_endpoint.sh wg0
-   ```
-2. Or generate keys manually and copy [`deploy/wg0.conf.example`](deploy/wg0.conf.example) to `/etc/wireguard/wg0.conf`:
-   ```bash
-   wg genkey | tee endpoint.key | wg pubkey > endpoint.pub
-   wg genkey | tee client.key   | wg pubkey > client.pub
-   sudo wg-quick up wg0
-   ```
-
-</details>
 
 ---
 
@@ -123,10 +107,7 @@ export class MapleDecoder {
 
 ---
 
-## 🛠️ Troubleshooting & Options
-
-<details>
-<summary>❓ Common fixes & CLI flags</summary>
+## 🛠️ Troubleshooting
 
 | Problem | Quick Fix |
 |---|---|
@@ -134,18 +115,9 @@ export class MapleDecoder {
 | **WireGuard tunnel shows `Waiting (:51820)`** | Make sure `MapleSprint.conf` is **Activated** in WireGuard for Windows and you are logged into a game channel |
 | **Mini overlay doesn't float on top** | Use Chrome or Edge (which support the W3C Document Picture-in-Picture API) |
 
-**Endpoint flags (`maplesprint-endpoint`):**
-- `--listen-udp` *(default `127.0.0.1:51820`)*: Localhost UDP address for packet capture
-- `--http` *(default `127.0.0.1:8080`)*: Localhost API & WebSocket address for the HUD
-- `--outbound-ip` *(default auto-detected)*: Physical LAN IPv4 address for outbound NIC binding
-- `--iface` *(default `wg0`)*: Network interface to capture on Linux (`--listen-udp=""`)
-- `--no-browser`: Suppress opening the HUD automatically on startup
-
-</details>
-
 ---
 
 ## 🤝 Contributing & License
 
-Pull requests for HUD improvements, endpoint scripts, or forwarder fixes are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).  
+Pull requests for HUD improvements or Go relay fixes are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).  
 Licensed under the [MIT License](LICENSE).
