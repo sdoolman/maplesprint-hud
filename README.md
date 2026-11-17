@@ -59,7 +59,7 @@ Download **`maplesprint-endpoint-windows-amd64.zip`** (Windows) or **`wg-forward
 ---
 
 ### 2️⃣ Connect WireGuard (Windows)
-1. Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) and click **`⚙ Endpoint`** in the top bar.
+1. Open [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) and open the **`⚙ Setup`** tab.
 2. Click **`⬇ MapleSprint.conf`** to download your split-tunnel configuration.
 3. Import `MapleSprint.conf` in [**WireGuard for Windows**](https://www.wireguard.com/install/) and click **Activate**.
 
@@ -97,7 +97,7 @@ You own your local network data. `maplesprint-endpoint` and the HUD are intentio
 
 - **How the Official HUD Ships `codec.mjs`:** On the hosted GitHub Pages app ([`sdoolman.github.io/maplesprint-hud`](https://sdoolman.github.io/maplesprint-hud/)), the pre-built `codec.mjs` release artifact is pulled automatically during the GitHub Actions Pages deployment (`ci.yml`) so built codec bundles are never tracked in git.
 - **Use Your Own Custom Codec (`?codec=`):** Want to experiment with your own packet decoder, support a custom server, or emit custom events? Pass any ES module URL via `?codec=http://127.0.0.1:3000/my-codec.mjs` (or drop a `codec.mjs` file alongside `index.html`).
-- **Consume the Local Stream Directly:** Any local script, Python notebook, or third-party overlay can connect directly to `ws://127.0.0.1:8080/ws` to read the raw TCP stream (`{ "type": "raw", "chunks": [{ "flow", "seq", "sport", "dport", "data" }] }`).
+- **Consume the Local Stream Directly:** Any local script or third-party overlay can connect to `ws://127.0.0.1:8080/ws` to read raw TCP segments (`{ "type": "raw_chunk", "flow", "seq", "sport", "data" }`).
 
 <details>
 <summary>🔌 Custom Codec ES Module Interface (<code>MapleDecoder</code>)</summary>
@@ -139,6 +139,7 @@ export class MapleDecoder {
 - `--http` *(default `127.0.0.1:8080`)*: Localhost API & WebSocket address for the HUD
 - `--outbound-ip` *(default auto-detected)*: Physical LAN IPv4 address for outbound NIC binding
 - `--iface` *(default `wg0`)*: Network interface to capture on Linux (`--listen-udp=""`)
+- `--no-browser`: Suppress opening the HUD automatically on startup
 
 </details>
 

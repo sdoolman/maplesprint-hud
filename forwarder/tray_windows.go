@@ -6,7 +6,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -14,51 +13,61 @@ import (
 )
 
 var (
-	user32               = syscall.NewLazyDLL("user32.dll")
-	shell32              = syscall.NewLazyDLL("shell32.dll")
-	kernel32             = syscall.NewLazyDLL("kernel32.dll")
-	procRegisterClassExW = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW  = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW   = user32.NewProc("DefWindowProcW")
-	procDestroyWindow    = user32.NewProc("DestroyWindow")
-	procGetMessageW      = user32.NewProc("GetMessageW")
-	procTranslateMessage = user32.NewProc("TranslateMessage")
-	procDispatchMessageW = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage  = user32.NewProc("PostQuitMessage")
-	procPostMessageW     = user32.NewProc("PostMessageW")
-	procCreatePopupMenu  = user32.NewProc("CreatePopupMenu")
-	procAppendMenuW      = user32.NewProc("AppendMenuW")
-	procTrackPopupMenu   = user32.NewProc("TrackPopupMenu")
-	procDestroyMenu      = user32.NewProc("DestroyMenu")
-	procSetForegroundWin = user32.NewProc("SetForegroundWindow")
-	procGetCursorPos     = user32.NewProc("GetCursorPos")
-	procCreateIcon       = user32.NewProc("CreateIcon")
-	procDestroyIcon      = user32.NewProc("DestroyIcon")
-	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
-	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	user32                = syscall.NewLazyDLL("user32.dll")
+	shell32               = syscall.NewLazyDLL("shell32.dll")
+	kernel32              = syscall.NewLazyDLL("kernel32.dll")
+	procRegisterClassExW  = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW   = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW    = user32.NewProc("DefWindowProcW")
+	procDestroyWindow     = user32.NewProc("DestroyWindow")
+	procGetMessageW       = user32.NewProc("GetMessageW")
+	procTranslateMessage  = user32.NewProc("TranslateMessage")
+	procDispatchMessageW  = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage   = user32.NewProc("PostQuitMessage")
+	procPostMessageW      = user32.NewProc("PostMessageW")
+	procCreatePopupMenu   = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW       = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu    = user32.NewProc("TrackPopupMenu")
+	procDestroyMenu       = user32.NewProc("DestroyMenu")
+	procSetForegroundWin  = user32.NewProc("SetForegroundWindow")
+	procGetCursorPos      = user32.NewProc("GetCursorPos")
+	procLoadIconW         = user32.NewProc("LoadIconW")
+	procLoadImageW        = user32.NewProc("LoadImageW")
+	procGetSystemMetrics  = user32.NewProc("GetSystemMetrics")
+	procShellNotifyIconW  = shell32.NewProc("Shell_NotifyIconW")
+	procShellExecuteW     = shell32.NewProc("ShellExecuteW")
+	procGetModuleHandleW  = kernel32.NewProc("GetModuleHandleW")
+	procEnumResourceNames = kernel32.NewProc("EnumResourceNamesW")
 )
 
 const (
-	wmDestroy     = 0x0002
-	wmClose       = 0x0010
-	wmCommand     = 0x0111
-	wmUser        = 0x0400
-	wmTrayIcon    = wmUser + 1
-	wmLButtonUp   = 0x0202
-	wmLButtonDbl  = 0x0203
-	wmRButtonUp   = 0x0205
-	nimAdd        = 0x00000000
-	nimDelete     = 0x00000002
-	nifMessage    = 0x00000001
-	nifIcon       = 0x00000002
-	nifTip        = 0x00000004
-	mfString      = 0x00000000
-	mfSeparator   = 0x00000800
-	tpmRightAlign = 0x0008
-	tpmBottomAlgn = 0x0020
-	cmdOpenHUD    = 1001
-	cmdOpenLog    = 1002
-	cmdQuit       = 1003
+	wmDestroy      = 0x0002
+	wmClose        = 0x0010
+	wmCommand      = 0x0111
+	wmUser         = 0x0400
+	wmTrayIcon     = wmUser + 1
+	wmLButtonUp    = 0x0202
+	wmLButtonDbl   = 0x0203
+	wmRButtonUp    = 0x0205
+	nimAdd         = 0x00000000
+	nimDelete      = 0x00000002
+	nifMessage     = 0x00000001
+	nifIcon        = 0x00000002
+	nifTip         = 0x00000004
+	mfString       = 0x00000000
+	mfSeparator    = 0x00000800
+	tpmRightAlign  = 0x0008
+	tpmBottomAlign = 0x0020
+	imageIcon      = 1
+	lrShared       = 0x00008000
+	smCxSmIcon     = 49
+	smCySmIcon     = 50
+	rtGroupIcon    = 14
+	idiApplication = 32512
+	swShowNormal   = 1
+	cmdOpenHUD     = 1001
+	cmdOpenLog     = 1002
+	cmdQuit        = 1003
 )
 
 type wndClassExW struct {
@@ -107,18 +116,23 @@ type notifyIconDataW struct {
 	hBalloonIcon     uintptr
 }
 
-func openBrowser(targetURL string) {
-	if targetURL == "" {
+// shellOpen launches a URL or local file using the user's default Windows handler.
+func shellOpen(target string) {
+	if target == "" {
 		return
 	}
-	_ = exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", targetURL).Start()
+	verb, _ := syscall.UTF16PtrFromString("open")
+	file, _ := syscall.UTF16PtrFromString(target)
+	_, _, _ = procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(verb)),
+		uintptr(unsafe.Pointer(file)),
+		0, 0, swShowNormal,
+	)
 }
 
-func openLogFile(path string) {
-	if path == "" {
-		return
-	}
-	_ = exec.Command("notepad.exe", path).Start()
+func openBrowser(targetURL string) {
+	shellOpen(targetURL)
 }
 
 func setupLogging() (string, func()) {
@@ -139,53 +153,83 @@ func setupLogging() (string, func()) {
 	return logPath, func() { _ = f.Close() }
 }
 
-// createMapleIcon builds a 16x16 orange maple-leaf RGBA tray icon in memory.
-func createMapleIcon(hInst uintptr) uintptr {
-	// 16x16 1bpp AND mask (all 0 = opaque where XOR alpha is set)
-	var andMask [32]byte
-	// 16x16 32bpp BGRA pixels
-	var pixels [16 * 16 * 4]byte
-	// Simple crisp orange rounded-badge with gold center leaf silhouette
-	for y := 0; y < 16; y++ {
-		for x := 0; x < 16; x++ {
-			idx := (y*16 + x) * 4
-			dx := x - 7
-			dy := y - 7
-			if dx*dx+dy*dy > 58 {
-				andMask[y*2+x/8] |= 1 << (7 - uint(x%8))
-				continue
-			}
-			// Inner golden maple diamond
-			if (dx >= -3 && dx <= 3 && dy >= -3 && dy <= 3 && (absInt(dx)+absInt(dy) <= 4)) || (dx == 0 && dy >= 4 && dy <= 5) {
-				pixels[idx+0] = 0x24 // B
-				pixels[idx+1] = 0xbf // G
-				pixels[idx+2] = 0xfb // R (Gold)
-				pixels[idx+3] = 0xff
-			} else {
-				pixels[idx+0] = 0x1a // B
-				pixels[idx+1] = 0x84 // G
-				pixels[idx+2] = 0xff // R (Maple Orange)
-				pixels[idx+3] = 0xff
-			}
-		}
+// loadAppTrayIcon loads the embedded PE RT_GROUP_ICON resource bundled from
+// assets/maplesprint.ico, falling back to stock IDI_APPLICATION when run unbundled.
+func loadAppTrayIcon(hInst uintptr) uintptr {
+	cx, _, _ := procGetSystemMetrics.Call(smCxSmIcon)
+	cy, _, _ := procGetSystemMetrics.Call(smCySmIcon)
+	if cx == 0 {
+		cx = 16
 	}
-	hIcon, _, _ := procCreateIcon.Call(
-		hInst,
-		16,
-		16,
-		1,
-		32,
-		uintptr(unsafe.Pointer(&andMask[0])),
-		uintptr(unsafe.Pointer(&pixels[0])),
-	)
-	return hIcon
+	if cy == 0 {
+		cy = 16
+	}
+
+	var found uintptr
+	enumCb := syscall.NewCallback(func(_ uintptr, _ uintptr, lpszName uintptr, _ uintptr) uintptr {
+		h, _, _ := procLoadImageW.Call(hInst, lpszName, imageIcon, cx, cy, lrShared)
+		if h != 0 {
+			found = h
+			return 0 // stop enumeration
+		}
+		return 1
+	})
+	_, _, _ = procEnumResourceNames.Call(hInst, uintptr(rtGroupIcon), enumCb, 0)
+	if found != 0 {
+		return found
+	}
+
+	stock, _, _ := procLoadIconW.Call(0, uintptr(idiApplication))
+	return stock
 }
 
-func absInt(v int) int {
-	if v < 0 {
-		return -v
+func showTrayMenu(hwnd uintptr, hasLog bool) {
+	hMenu, _, _ := procCreatePopupMenu.Call()
+	if hMenu == 0 {
+		return
 	}
-	return v
+	defer procDestroyMenu.Call(hMenu)
+
+	items := []struct {
+		id    uintptr
+		flags uintptr
+		label string
+	}{
+		{cmdOpenHUD, mfString, "Open MapleSprint HUD"},
+	}
+	if hasLog {
+		items = append(items, struct {
+			id    uintptr
+			flags uintptr
+			label string
+		}{cmdOpenLog, mfString, "Open Relay Log"})
+	}
+	items = append(items,
+		struct {
+			id    uintptr
+			flags uintptr
+			label string
+		}{0, mfSeparator, ""},
+		struct {
+			id    uintptr
+			flags uintptr
+			label string
+		}{cmdQuit, mfString, "Quit MapleSprint Relay"},
+	)
+
+	for _, it := range items {
+		var lpText uintptr
+		if it.label != "" {
+			p, _ := syscall.UTF16PtrFromString(it.label)
+			lpText = uintptr(unsafe.Pointer(p))
+		}
+		_, _, _ = procAppendMenuW.Call(hMenu, it.flags, it.id, lpText)
+	}
+
+	var pt point
+	_, _, _ = procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	_, _, _ = procSetForegroundWin.Call(hwnd)
+	_, _, _ = procTrackPopupMenu.Call(hMenu, tpmRightAlign|tpmBottomAlign, uintptr(pt.x), uintptr(pt.y), 0, hwnd, 0)
 }
 
 func runTray(ctx context.Context, cancel context.CancelFunc, hudURL, logPath string) {
@@ -194,45 +238,24 @@ func runTray(ctx context.Context, cancel context.CancelFunc, hudURL, logPath str
 
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("MapleSprintTrayWnd")
-	hIcon := createMapleIcon(hInst)
-	if hIcon != 0 {
-		defer procDestroyIcon.Call(hIcon)
-	}
+	hIcon := loadAppTrayIcon(hInst)
 
-	var hwnd uintptr
 	wndProc := syscall.NewCallback(func(h uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		switch msg {
 		case wmTrayIcon:
 			switch lParam {
 			case wmLButtonUp, wmLButtonDbl:
-				openBrowser(hudURL)
+				shellOpen(hudURL)
 			case wmRButtonUp:
-				hMenu, _, _ := procCreatePopupMenu.Call()
-				if hMenu != 0 {
-					sOpen, _ := syscall.UTF16PtrFromString("Open MapleSprint HUD")
-					sLog, _ := syscall.UTF16PtrFromString("Open Relay Log")
-					sQuit, _ := syscall.UTF16PtrFromString("Quit MapleSprint Relay")
-					_, _, _ = procAppendMenuW.Call(hMenu, mfString, cmdOpenHUD, uintptr(unsafe.Pointer(sOpen)))
-					if logPath != "" {
-						_, _, _ = procAppendMenuW.Call(hMenu, mfString, cmdOpenLog, uintptr(unsafe.Pointer(sLog)))
-					}
-					_, _, _ = procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
-					_, _, _ = procAppendMenuW.Call(hMenu, mfString, cmdQuit, uintptr(unsafe.Pointer(sQuit)))
-
-					var pt point
-					_, _, _ = procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-					_, _, _ = procSetForegroundWin.Call(h)
-					_, _, _ = procTrackPopupMenu.Call(hMenu, tpmRightAlign|tpmBottomAlgn, uintptr(pt.x), uintptr(pt.y), 0, h, 0)
-					_, _, _ = procDestroyMenu.Call(hMenu)
-				}
+				showTrayMenu(h, logPath != "")
 			}
 			return 0
 		case wmCommand:
 			switch wParam & 0xffff {
 			case cmdOpenHUD:
-				openBrowser(hudURL)
+				shellOpen(hudURL)
 			case cmdOpenLog:
-				openLogFile(logPath)
+				shellOpen(logPath)
 			case cmdQuit:
 				cancel()
 				_, _, _ = procDestroyWindow.Call(h)
@@ -254,20 +277,24 @@ func runTray(ctx context.Context, cancel context.CancelFunc, hudURL, logPath str
 		cbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
 		lpfnWndProc:   wndProc,
 		hInstance:     hInst,
+		hIcon:         hIcon,
 		lpszClassName: className,
 	}
-	_, _, _ = procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if atom, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); atom == 0 {
+		log.Printf("tray window class registration failed: %v", err)
+		<-ctx.Done()
+		return
+	}
 
 	title, _ := syscall.UTF16PtrFromString("MapleSprint Relay")
-	hwnd, _, _ = procCreateWindowExW.Call(
+	hwnd, _, err := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
-		0,
-		0, 0, 0, 0,
-		0, 0, hInst, 0,
+		0, 0, 0, 0, 0, 0, 0, hInst, 0,
 	)
 	if hwnd == 0 {
+		log.Printf("tray window creation failed: %v", err)
 		<-ctx.Done()
 		return
 	}
@@ -282,7 +309,9 @@ func runTray(ctx context.Context, cancel context.CancelFunc, hudURL, logPath str
 	tip, _ := syscall.UTF16FromString("MapleSprint Relay — Click to open HUD")
 	copy(nid.szTip[:], tip)
 
-	_, _, _ = procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
+	if ok, _, err := procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid))); ok == 0 {
+		log.Printf("tray icon add failed: %v", err)
+	}
 	defer func() {
 		_, _, _ = procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&nid)))
 	}()

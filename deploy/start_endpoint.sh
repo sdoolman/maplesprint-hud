@@ -18,7 +18,7 @@ LOCAL_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="
 
 echo "==> MapleSprint Open-Source Local Endpoint"
 echo "    Endpoint API : http://${HTTP_ADDR}/status"
-echo "    Dashboard UI : ${HUD_URL}?worker=http://${HTTP_ADDR}&room=local"
+echo "    Dashboard UI : ${HUD_URL}?endpoint=http://${HTTP_ADDR}"
 
 exec "$BIN" \
   --iface "$IFACE" \

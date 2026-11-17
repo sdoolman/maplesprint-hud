@@ -1,0 +1,64 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  padding: 10px 12px;
+  background: #12101a;
+  color: #f3efe6;
+  font-family: system-ui, -apple-system, sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: #a69eb8;
+  font-weight: 700;
+}
+.pill {
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.pill.active {
+  background: rgba(74, 222, 128, 0.2);
+  color: #4ade80;
+}
+.pill.paused {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.metric {
+  background: #1b1826;
+  border: 1px solid #3a324d;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.lbl {
+  font-size: 10px;
+  color: #a69eb8;
+  font-weight: 700;
+}
+.val {
+  font-size: 14px;
+  font-weight: 800;
+  color: #ff9429;
+  font-variant-numeric: tabular-nums;
+}
+.val.gold {
+  color: #fbbf24;
+}

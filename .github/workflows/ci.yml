@@ -33,11 +33,11 @@ jobs:
         run: go vet ./...
       - name: Unit tests
         run: go test -v ./...
-      - name: Build Windows (tray + manifest + zip) & Linux endpoint binaries
+      - name: Build Windows (tray + icon + manifest + zip) & Linux endpoint binaries
         run: |
           mkdir -p ../dist
           go install github.com/akavel/rsrc@v0.10.2
-          "$(go env GOPATH)/bin/rsrc" -manifest app.manifest -o rsrc_windows_amd64.syso
+          "$(go env GOPATH)/bin/rsrc" -manifest app.manifest -ico assets/maplesprint.ico -o rsrc_windows_amd64.syso
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui" -o ../dist/maplesprint-endpoint-windows-amd64.exe .
           rm -f rsrc_windows_amd64.syso
           zip -j ../dist/maplesprint-endpoint-windows-amd64.zip ../dist/maplesprint-endpoint-windows-amd64.exe
@@ -78,7 +78,7 @@ jobs:
           node-version: "20"
       - name: Syntax & HUD verification
         run: |
-          node --check app.js
+          for f in js/*.js; do node --check "$f"; done
           node --test verify.mjs
 
   deploy-pages:
@@ -93,7 +93,8 @@ jobs:
       - name: Stage static HUD files into _site
         run: |
           mkdir -p _site
-          cp index.html app.js style.css _site/
+          cp index.html style.css pip.css _site/
+          cp -r js _site/
           if [ -d data ]; then cp -r data _site/; fi
       - name: Pull pre-built codec.mjs release artifact from maple-collector
         env:

@@ -3,7 +3,11 @@ package main
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,5 +115,56 @@ func TestValidatePortRange(t *testing.T) {
 	}
 	if _, _, err := validatePortRange(9000, 8000); err == nil {
 		t.Fatal("expected error for inverted port range")
+	}
+}
+
+func TestEndpointServerRoutesAndPNA(t *testing.T) {
+	srv := &EndpointServer{
+		mode:         "udp-loopback",
+		listenTarget: "127.0.0.1:51820",
+		outboundIP:   "192.168.1.50",
+		hudURL:       "https://sdoolman.github.io/maplesprint-hud/",
+		sportMin:     8484,
+		sportMax:     8999,
+		hub:          NewRelayHub(),
+	}
+	h := srv.Handler()
+
+	// OPTIONS preflight should include Private Network Access header
+	reqOpt := httptest.NewRequest(http.MethodOptions, "/status", nil)
+	recOpt := httptest.NewRecorder()
+	h.ServeHTTP(recOpt, reqOpt)
+	if recOpt.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for OPTIONS, got %d", recOpt.Code)
+	}
+	if recOpt.Header().Get("Access-Control-Allow-Private-Network") != "true" {
+		t.Fatal("missing Access-Control-Allow-Private-Network header")
+	}
+
+	// GET /status returns valid JSON metadata
+	reqSt := httptest.NewRequest(http.MethodGet, "/status", nil)
+	recSt := httptest.NewRecorder()
+	h.ServeHTTP(recSt, reqSt)
+	if recSt.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /status, got %d", recSt.Code)
+	}
+	var st EndpointStatus
+	if err := json.Unmarshal(recSt.Body.Bytes(), &st); err != nil {
+		t.Fatalf("invalid status JSON: %v", err)
+	}
+	if !st.OK || st.PortRange != "8484-8999" || st.OutboundIP != "192.168.1.50" {
+		t.Fatalf("unexpected status payload: %+v", st)
+	}
+
+	// GET / redirects to GitHub Pages HUD with ?endpoint=
+	reqRoot := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
+	recRoot := httptest.NewRecorder()
+	h.ServeHTTP(recRoot, reqRoot)
+	if recRoot.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect on /, got %d", recRoot.Code)
+	}
+	loc := recRoot.Header().Get("Location")
+	if !strings.Contains(loc, "endpoint=http%3A%2F%2F127.0.0.1%3A8080") {
+		t.Fatalf("unexpected redirect target: %s", loc)
 	}
 }
