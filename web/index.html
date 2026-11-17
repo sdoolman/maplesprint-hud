@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="css/style.css?v=20261117i" />
+  <link rel="stylesheet" href="css/style.css?v=20261117j" />
 </head>
 <body>
   <main class="wrap">
@@ -12,7 +12,7 @@
       <div>
         <div class="title-row">
           <h1>🍁 MapleSprint HUD</h1>
-          <span id="grindStateBadge" class="pill paused" title="15-second idle auto-pause">PAUSED</span>
+          <span id="grindStateBadge" class="pill" title="15-second idle auto-pause">STANDBY</span>
         </div>
         <p id="mapLine" class="muted">Not connected</p>
       </div>
@@ -38,7 +38,7 @@
             <div class="level-header">
             <div class="level-identity">
                 <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="100" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
-                <span id="charJob" class="job-badge">Beginner</span>
+                <select id="charJob" class="job-badge" aria-label="Character Job" title="Character Job (auto-updates from packet stream or set manually)"></select>
               </div>
               <div class="level-eta">
                 <span id="levelPct" class="level-pct">0.00%</span>
@@ -232,6 +232,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261117i"></script>
+  <script type="module" src="js/main.js?v=20261117j"></script>
 </body>
 </html>

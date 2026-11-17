@@ -65,7 +65,7 @@ const viewHistory = requireEl("viewHistory");
 const viewSetup = requireEl("viewSetup");
 
 const manualLevelInput = /** @type {HTMLInputElement} */ (requireEl("manualLevelInput"));
-const charJobEl = requireEl("charJob");
+const charJobEl = /** @type {HTMLSelectElement} */ (requireEl("charJob"));
 const levelPctEl = requireEl("levelPct");
 const ttlEl = requireEl("ttl");
 const levelProgressBar = requireEl("levelProgressBar");
@@ -107,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117i", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117j", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -172,6 +172,37 @@ const state = createSessionState(
   loadSavedSplits()
 );
 
+function guideFilterForJob(jobId) {
+  const id = Number(jobId) || 0;
+  if (id >= 230 && id <= 232) return "cleric";
+  if (id >= 200 && id < 300) return "magician";
+  if (id >= 100 && id < 200) return "warrior";
+  if (id >= 300 && id < 400) return "bowman";
+  if (id >= 400 && id < 500) return "thief";
+  return "all";
+}
+
+function populateJobSelect() {
+  charJobEl.replaceChildren();
+  for (const [id, name] of Object.entries(JOB_NAMES)) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = name;
+    charJobEl.append(opt);
+  }
+}
+
+function setJobSelectValue(jobId) {
+  const val = String(Number(jobId) || 0);
+  if (![...charJobEl.options].some((o) => o.value === val)) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = JOB_NAMES[Number(val)] || `Job #${val}`;
+    charJobEl.append(opt);
+  }
+  charJobEl.value = val;
+}
+
 function setCharacterProgression(level, job) {
   if (level >= 1 && level <= MAX_CLASSIC_LEVEL) {
     state.level = level;
@@ -181,10 +212,13 @@ function setCharacterProgression(level, job) {
   }
   if (job != null) {
     state.job = Number(job);
+    setJobSelectValue(state.job);
     localStorage.setItem(STORAGE_KEYS.job, String(state.job));
   }
 }
 
+populateJobSelect();
+setJobSelectValue(state.job);
 manualLevelInput.value = String(state.level);
 guideLevelInput.value = String(state.level > 1 ? state.level : HUD_CONFIG.defaultGuideLevel);
 
@@ -235,6 +269,8 @@ function ingestRawChunk(flow, seq, b64Data) {
   const events = codecEngine.decoder.feedChunk(flow, seq, payload);
   if (Array.isArray(events) && events.length > 0) {
     for (const ev of events) handleEvent(ev);
+    render();
+  } else if (state.rawChunksReceived === 1 || state.mapId === null) {
     render();
   }
 }
@@ -485,8 +521,16 @@ function renderInventory(activeSec) {
 function render() {
   const now = Date.now();
   const isGrinding = state.lastActiveTs !== null && now - state.lastActiveTs <= AUTO_PAUSE_IDLE_MS;
-  grindStateBadge.textContent = isGrinding ? "ACTIVE" : "PAUSED";
-  grindStateBadge.className = `pill ${isGrinding ? "active-state" : "paused"}`;
+  if (isGrinding) {
+    grindStateBadge.textContent = "ACTIVE";
+    grindStateBadge.className = "pill active-state";
+  } else if (state.startTs) {
+    grindStateBadge.textContent = "PAUSED";
+    grindStateBadge.className = "pill paused";
+  } else {
+    grindStateBadge.textContent = "STANDBY";
+    grindStateBadge.className = "pill";
+  }
 
   const pendingDelta = isGrinding && state.lastActiveTs ? Math.max(0, now - state.lastActiveTs) : 0;
   const effectiveActiveMs = state.activeMs + pendingDelta;
@@ -505,7 +549,7 @@ function render() {
   renderCombatAndVitals(activeSec);
   renderInventory(activeSec);
 
-  charJobEl.textContent = JOB_NAMES[state.job] || `Job #${state.job}`;
+  setJobSelectValue(state.job);
   const prog = computeLevelProgress(rolling5m > 0 ? rolling5m : xphVal);
   levelPctEl.textContent = prog.pctLabel;
   levelProgressBar.style.width = `${prog.pct.toFixed(2)}%`;
@@ -516,6 +560,13 @@ function render() {
     const m = db.maps[state.mapId];
     currentMapName = m ? m.name : `Map #${state.mapId}`;
     mapLine.textContent = `${m ? `${m.name} (${m.street})` : `Map #${state.mapId}`} • Ch. ${state.ch ?? "?"}`;
+  } else if (endpointClient.isOpen()) {
+    mapLine.textContent =
+      state.rawChunksReceived > 0
+        ? `Live stream active (${state.rawChunksReceived.toLocaleString()} segs) — change map or Ch. to detect map`
+        : "Connected — waiting for WireGuard game traffic...";
+  } else {
+    mapLine.textContent = "Not connected";
   }
   eventCountEl.textContent = `${state.events.toLocaleString()} events`;
 
@@ -575,11 +626,14 @@ const EVENT_HANDLERS = {
     if (ev.max_hp) state.maxHp = ev.max_hp;
     if (ev.max_mp) state.maxMp = ev.max_mp;
   },
-  hp_mp(ev) {
+  hp_mp(ev, evTs) {
     if (ev.hp != null) state.hp = ev.hp;
     if (ev.mp != null) state.mp = ev.mp;
     if (ev.max_hp) state.maxHp = ev.max_hp;
     if (ev.max_mp) state.maxMp = ev.max_mp;
+    if (ev.damage_taken || (typeof ev.mp_delta === "number" && ev.mp_delta < 0)) {
+      recordActiveTime(evTs);
+    }
     if (ev.damage_taken) {
       state.damageTaken += ev.damage_taken;
       addFeed(`Took ${ev.damage_taken} dmg (HP ${ev.hp})`);
@@ -624,10 +678,6 @@ const EVENT_HANDLERS = {
     if (split) split.mesos_gained += ev.amount;
     saveSplits();
     addFeed(`+${ev.amount.toLocaleString()} mesos`);
-  },
-  attack_hit(ev, evTs) {
-    recordActiveTime(evTs);
-    if (ev.damage > 0) state.damageDealt += ev.damage;
   },
 };
 
@@ -743,6 +793,14 @@ manualLevelInput.addEventListener("change", () => {
   render();
 });
 
+charJobEl.addEventListener("change", () => {
+  const jobId = Number(charJobEl.value) || 0;
+  setCharacterProgression(null, jobId);
+  guideJobSelect.value = guideFilterForJob(jobId);
+  render();
+  renderGuide();
+});
+
 guideLevelInput.addEventListener("input", renderGuide);
 guideJobSelect.addEventListener("change", renderGuide);
 guideSortSelect.addEventListener("change", renderGuide);
@@ -847,7 +905,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 setInterval(() => {
-  if (state.startTs) render();
+  if (state.startTs || state.rawChunksReceived > 0) render();
 }, HUD_CONFIG.renderIntervalMs);
 
 setInterval(refreshEndpointStatus, ENDPOINT_CONFIG.probeIntervalMs);
