@@ -35,12 +35,10 @@ Your game traffic stays clean on your own residential IP through WireGuard, whil
 ## 🚀 Quick Start (3 Minutes)
 
 ### 1️⃣ Start the Local Endpoint (Windows PC, Raspberry Pi, or Linux)
-Download the latest **`maplesprint-endpoint-windows-amd64.exe`** (Windows) or **`wg-forwarder-linux-amd64`** (Linux) from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases) and run it:
+Download **`maplesprint-endpoint-windows-amd64.zip`** (Windows) or **`wg-forwarder-linux-amd64`** (Linux) from [**Releases**](https://github.com/sdoolman/maplesprint-hud/releases), extract, and double-click **`maplesprint-endpoint-windows-amd64.exe`**:
 
-```powershell
-# Windows (runs on 127.0.0.1:51820 & 127.0.0.1:8080 — no Admin required)
-.\maplesprint-endpoint-windows-amd64.exe
-```
+- Launches silently in the **Windows System Tray** (bottom-right taskbar icon) with zero console windows.
+- Automatically opens [**sdoolman.github.io/maplesprint-hud**](https://sdoolman.github.io/maplesprint-hud/) in your browser (right-click the tray icon for **Open HUD**, **Open Relay Log**, or **Quit**).
 
 <details>
 <summary>🔧 Running on a separate Linux / Raspberry Pi endpoint instead? Click here</summary>

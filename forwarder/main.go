@@ -420,9 +420,13 @@ func main() {
 	outboundIP := flag.String("outbound-ip", "", "Physical LAN IPv4 for outbound NIC binding (auto-detected if empty)")
 	clientConf := flag.String("client-conf", "", "Optional path to MapleSprint.conf for 1-click download from the HUD")
 	hudURL := flag.String("hud-url", defaultHUDURL, "GitHub Pages HUD URL")
+	noBrowser := flag.Bool("no-browser", false, "Do not automatically open the HUD in your browser on startup")
 	sportMinFlag := flag.Int("sport-min", 8484, "Minimum TCP source port (default 8484)")
 	sportMaxFlag := flag.Int("sport-max", 8999, "Maximum TCP source port (default 8999)")
 	flag.Parse()
+
+	logPath, closeLog := setupLogging()
+	defer closeLog()
 
 	sportMin, sportMax, err := validatePortRange(*sportMinFlag, *sportMaxFlag)
 	if err != nil {
@@ -461,7 +465,16 @@ func main() {
 	fwd := NewForwarder(source, sportMin, sportMax)
 	startAPIServer(ctx, *httpAddr, mode, target, physIP, *clientConf, *hudURL, sportMin, sportMax, fwd.hub)
 
-	if err := fwd.Run(ctx); err != nil {
-		log.Fatal(err)
+	if !*noBrowser {
+		openBrowser(*hudURL)
 	}
+
+	go func() {
+		if err := fwd.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("forwarder stopped: %v", err)
+			stop()
+		}
+	}()
+
+	runTray(ctx, stop, *hudURL, logPath)
 }

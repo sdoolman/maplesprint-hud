@@ -33,12 +33,18 @@ jobs:
         run: go vet ./...
       - name: Unit tests
         run: go test -v ./...
-      - name: Build Windows & Linux endpoint binaries
+      - name: Build Windows (tray + manifest + zip) & Linux endpoint binaries
         run: |
           mkdir -p ../dist
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/maplesprint-endpoint-windows-amd64.exe .
+          go install github.com/akavel/rsrc@v0.10.2
+          "$(go env GOPATH)/bin/rsrc" -manifest app.manifest -o rsrc_windows_amd64.syso
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui" -o ../dist/maplesprint-endpoint-windows-amd64.exe .
+          rm -f rsrc_windows_amd64.syso
+          zip -j ../dist/maplesprint-endpoint-windows-amd64.zip ../dist/maplesprint-endpoint-windows-amd64.exe
+          rm -f ../dist/maplesprint-endpoint-windows-amd64.exe
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/wg-forwarder-linux-amd64 .
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../dist/wg-forwarder-linux-arm64 .
+          (cd ../dist && sha256sum * > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
           name: maplesprint-endpoint-binaries
