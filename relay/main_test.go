@@ -187,11 +187,24 @@ func TestEndpointServerRoutesAndPNA(t *testing.T) {
 		t.Fatalf("unexpected redirect target: %s", recRoot.Header().Get("Location"))
 	}
 
-	reqConf := httptest.NewRequest(http.MethodGet, cfg.Routes.Conf, nil)
+	reqConfMissing := httptest.NewRequest(http.MethodGet, cfg.Routes.ClientConf, nil)
+	recConfMissing := httptest.NewRecorder()
+	h.ServeHTTP(recConfMissing, reqConfMissing)
+	if recConfMissing.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for %s when unconfigured, got %d", cfg.Routes.ClientConf, recConfMissing.Code)
+	}
+
+	confFile := filepath.Join(t.TempDir(), "MapleSprint.conf")
+	const sampleConf = "[Interface]\nAddress = 10.66.66.2/32\n[Peer]\nEndpoint = 127.0.0.1:51821\nAllowedIPs = 158.115.192.0/19\n"
+	if err := os.WriteFile(confFile, []byte(sampleConf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.clientConfPath = confFile
+	reqConf := httptest.NewRequest(http.MethodGet, cfg.Routes.ClientConf, nil)
 	recConf := httptest.NewRecorder()
 	h.ServeHTTP(recConf, reqConf)
 	if recConf.Code != http.StatusOK {
-		t.Fatalf("expected 200 for %s, got %d", cfg.Routes.Conf, recConf.Code)
+		t.Fatalf("expected 200 for %s, got %d", cfg.Routes.ClientConf, recConf.Code)
 	}
 	if body := recConf.Body.String(); !strings.Contains(body, "Endpoint = 127.0.0.1:51821") || !strings.Contains(body, "AllowedIPs = ") {
 		t.Fatalf("unexpected MapleSprint.conf body: %s", body)
