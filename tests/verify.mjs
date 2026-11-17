@@ -222,6 +222,8 @@ test("probeEndpoint and fetchWireGuardConf handle valid, error, and offline rela
 
     const fallbackConf = await fetchWireGuardConf("http://127.0.0.1:8080", 51899);
     assert.match(fallbackConf, /Endpoint = 127\.0\.0\.1:51899/);
+    assert.match(fallbackConf, /^PrivateKey = [A-Za-z0-9+/]{43}=$/m);
+    assert.match(fallbackConf, /^PublicKey = [A-Za-z0-9+/]{43}=$/m);
     const defaultPortConf = await fetchWireGuardConf("invalid", -1);
     assert.match(defaultPortConf, /Endpoint = 127\.0\.0\.1:51820/);
 

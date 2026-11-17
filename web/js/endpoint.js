@@ -68,8 +68,18 @@ export async function probeEndpoint(rawBaseUrl) {
   }
 }
 
+function randomWireGuardKeyB64() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  bytes[0] &= 248;
+  bytes[31] = (bytes[31] & 127) | 64;
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
 /**
- * Fetches MapleSprint.conf from the running endpoint relay, or builds a template matching its WG port.
+ * Fetches MapleSprint.conf from the running endpoint relay, or builds a valid WireGuard template matching its WG port.
  * @param {string} rawBaseUrl
  * @param {number} [fallbackWgPort]
  */
@@ -82,13 +92,15 @@ export async function fetchWireGuardConf(rawBaseUrl, fallbackWgPort = ENDPOINT_C
     } catch {}
   }
   const port = Number.isInteger(fallbackWgPort) && fallbackWgPort > 0 ? fallbackWgPort : ENDPOINT_CONFIG.defaultWgPort;
+  const clientPriv = randomWireGuardKeyB64();
+  const peerPub = randomWireGuardKeyB64();
   return [
     "[Interface]",
-    "PrivateKey = <CLIENT_PRIVATE_KEY>",
+    `PrivateKey = ${clientPriv}`,
     "Address = 10.66.66.2/32",
     "",
     "[Peer]",
-    "PublicKey = <ENDPOINT_PUBLIC_KEY>",
+    `PublicKey = ${peerPub}`,
     `Endpoint = 127.0.0.1:${port}`,
     "AllowedIPs = 158.115.192.0/19",
     "PersistentKeepalive = 25",
