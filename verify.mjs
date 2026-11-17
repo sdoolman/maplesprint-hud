@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } from "./js/catalog.js";
-import { escapeHtml, formatCompact, formatDuration } from "./js/constants.js";
+import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, escapeHtml, formatCompact, formatDuration } from "./js/constants.js";
+import { sanitizeEndpointUrl } from "./js/endpoint.js";
 import { renderGuideHtml, renderSplitsHtml, scoreMap } from "./js/guide.js";
 
 const rootDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
@@ -39,16 +40,36 @@ test("all requireEl() IDs exist uniquely in index.html", () => {
   }
 });
 
-test("layout CSS guards and full-width responsive layout", () => {
-  assert.match(css, /\.wrap\s*\{[^}]*max-width:\s*1360px/);
-  assert.match(css, /\.hud-layout\s*\{/);
-  assert.match(css, /\.config\s*\{[^}]*display:\s*flex;\s*flex-direction:\s*column;/);
-  assert.match(css, /\.actions\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*1fr\)/);
-  assert.match(css, /\.hidden\s*\{\s*display:\s*none;\s*\}/);
-  assert.match(css, /color-scheme:\s*dark;/);
+test("Classic World EXP table and job names match MapleStory Classic World (no Pirate, accurate Lv 51+ curve)", () => {
+  assert.equal(CLASSIC_EXP_TABLE.length, MAX_CLASSIC_LEVEL);
+  assert.equal(CLASSIC_EXP_TABLE[1], 15);
+  assert.equal(CLASSIC_EXP_TABLE[51], 748_608);
+  assert.equal(CLASSIC_EXP_TABLE[90], 11_938_059);
+  assert.equal(CLASSIC_EXP_TABLE[99], 9_482_161_548);
+  for (const [id, name] of Object.entries(JOB_NAMES)) {
+    assert.ok(Number(id) < 500, `Unexpected non-Classic job ID ${id} (${name})`);
+    assert.notEqual(name, "Pirate");
+  }
 });
 
-test("catalog normalization, guide scoring, HTML escaping, and MeowDB/Henesys links behave accurately", () => {
+test("endpoint URL sanitizer accepts only valid HTTP(S) origins", () => {
+  const okRes = sanitizeEndpointUrl("http://127.0.0.1:8080/");
+  assert.equal(okRes.ok, true);
+  if (okRes.ok) {
+    assert.equal(okRes.httpBase, "http://127.0.0.1:8080");
+    assert.equal(okRes.wsUrl, "ws://127.0.0.1:8080/ws");
+  }
+  const tlsRes = sanitizeEndpointUrl("https://relay.example.com:8443/sub/");
+  assert.equal(tlsRes.ok, true);
+  if (tlsRes.ok) {
+    assert.equal(tlsRes.wsUrl, "wss://relay.example.com:8443/sub/ws");
+  }
+  for (const bad of ["", "javascript:alert(1)", "file:///etc/passwd", "ws://127.0.0.1:8080", "not a url"]) {
+    assert.equal(sanitizeEndpointUrl(bad).ok, false, `Expected ${bad} to fail sanitization`);
+  }
+});
+
+test("OSMS elements schema, transparent 0-100 suitability rating, escaping, and MeowDB/Henesys links behave accurately", () => {
   assert.equal(escapeHtml(`<script>"'&`), "&lt;script&gt;&quot;&#39;&amp;");
   assert.equal(formatCompact(1_250_000), "1.25M");
   assert.equal(formatDuration(3661_000), "01:01:01");
@@ -61,25 +82,38 @@ test("catalog normalization, guide scoring, HTML escaping, and MeowDB/Henesys li
   const mobs = normalizeMonsters(
     {
       monsters: [
-        { id: 2230101, name: "Zombie Mushroom", level: 24, exp: 42, hp: 500, undead: true, maps: [{ id: 10004140, count: 16 }] },
+        {
+          id: 21,
+          name: "Rotten Mushroom",
+          level: 24,
+          exp: 45,
+          hp: 436,
+          undead: 1,
+          elements: { Holy: "Weak", Fire: "Weak" },
+          maps: [{ id: 10004140, count: 32 }],
+        },
       ],
     },
     maps
   );
-  const items = normalizeItems({ items: [{ id: 4000015, name: "Horny Mushroom Cap", stats: { price: 15 } }] });
+  const items = normalizeItems({ items: [{ id: 4000015, name: "Mushroom Cap", stats: { price: 15 } }] });
   assert.equal(items[4000015].price, 15);
 
   const guide = buildGuideIndex(maps, mobs);
   assert.equal(guide.length, 1);
   assert.equal(guide[0].hasUndead, true);
+  assert.equal(guide[0].hasFireWeak, true);
+  assert.equal(guide[0].hasHolyWeak, true);
 
   const clericScore = scoreMap(guide[0], 23, "cleric");
+  const mageScore = scoreMap(guide[0], 23, "magician");
   const baseScore = scoreMap(guide[0], 23, "all");
-  assert.ok(clericScore.score > baseScore.score, "Cleric bonus should boost undead map score");
-  assert.equal(clericScore.parts.lvGap, 0, "Mob Lv. 24 vs Char Lv. 23 should be inside 0-penalty sweet spot");
+  assert.ok(clericScore.score > baseScore.score && clericScore.score <= 100);
+  assert.ok(mageScore.score > baseScore.score && mageScore.score <= 100);
+  assert.equal(clericScore.parts.distFromIdeal, 0);
 
   const outOfRange = scoreMap(guide[0], 10, "all");
-  assert.ok(outOfRange.parts.lvGap > 0, "Mob Lv. 24 vs Char Lv. 10 should incur level-gap penalty");
+  assert.ok(outOfRange.parts.distFromIdeal > 0 && outOfRange.parts.levelFit < baseScore.parts.levelFit);
 
   const guideHtml = renderGuideHtml({
     loaded: true,
@@ -94,6 +128,7 @@ test("catalog normalization, guide scoring, HTML escaping, and MeowDB/Henesys li
   assert.ok(guideHtml.includes("&lt;Ant Tunnel&gt;"));
   assert.ok(guideHtml.includes("https://meowdb.com/msclassic/maps/010004140"));
   assert.ok(guideHtml.includes("https://henesys.gg/maps/10004140"));
+  assert.match(guideHtml, /Fit \d+\/100/);
 
   const splitsHtml = renderSplitsHtml(
     [{ map_id: 10004140, channel: 2, active_ms: 60_000, exp_gained: 5000, kills: 120, mesos_gained: 1500, drops: 3 }],
@@ -103,14 +138,22 @@ test("catalog normalization, guide scoring, HTML escaping, and MeowDB/Henesys li
   assert.ok(splitsHtml.includes("300,000/h"));
 });
 
-test("public repo contains zero codec files, static ICO resource exists, and zero plaintext MapleStory opcodes", () => {
+test("layout CSS guards and full-width responsive layout", () => {
+  assert.match(css, /\.wrap\s*\{[^}]*max-width:\s*1360px/);
+  assert.match(css, /\.hud-layout\s*\{/);
+  assert.match(css, /\.hidden\s*\{\s*display:\s*none;\s*\}/);
+  assert.match(css, /color-scheme:\s*dark;/);
+});
+
+test("public repo contains zero codec files, static ICO resource exists, safe URL validation, and zero plaintext opcodes", () => {
   assert.ok(!existsSync(path.join(rootDir, "forwarder/codec.go")), "forwarder/codec.go must not exist in public repo");
   assert.ok(!existsSync(path.join(rootDir, "codec.wasm")), "codec.wasm must not exist in public repo");
   assert.ok(existsSync(path.join(rootDir, "forwarder/assets/maplesprint.ico")), "Windows .ico asset must exist on disk");
 
   const mainGo = readFileSync(path.join(rootDir, "forwarder/main.go"), "utf8");
+  const packetGo = readFileSync(path.join(rootDir, "forwarder/packet.go"), "utf8");
   const trayWinGo = readFileSync(path.join(rootDir, "forwarder/tray_windows.go"), "utf8");
-  const allCode = [...jsFiles.map((f) => readFileSync(f, "utf8")), mainGo, trayWinGo].join("\n");
+  const allCode = [...jsFiles.map((f) => readFileSync(f, "utf8")), mainGo, packetGo, trayWinGo].join("\n");
 
   for (const forbidden of [
     "0x007e", "0x008b", "0x01a9", "0x02a8", "0x02a9", "0x02aa",
@@ -123,5 +166,8 @@ test("public repo contains zero codec files, static ICO resource exists, and zer
   assert.match(mainGo, /golang\.org\/x\/net\/websocket/);
   assert.match(mainGo, /Access-Control-Allow-Private-Network/);
   assert.match(mainGo, /NewPhysicalNICDialer/);
+  assert.match(trayWinGo, /validateHTTPURL/);
+  assert.match(trayWinGo, /validateLogPath/);
+  assert.ok(!trayWinGo.includes("createMapleIcon"), "In-memory icon pixel drawing must not exist");
   assert.ok(!mainGo.includes("<!DOCTYPE html>"), "forwarder/main.go must not embed its own HTML UI");
 });

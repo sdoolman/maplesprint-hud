@@ -1,8 +1,8 @@
 // MapleSprint Open-Source Local Endpoint Relay
 //
 // This slim, auditable local daemon bridges your WireGuard split-tunnel
-// interface (158.115.192.0/19, TCP source ports 8484-8999) to the MapleSprint
-// HUD running in your browser (https://sdoolman.github.io/maplesprint-hud/).
+// interface (TCP source ports configurable via --sport-min/--sport-max) to the
+// MapleSprint HUD running in your browser.
 //
 // Design principles:
 //   - 100% Open-Source & Auditable: No game packet decoding or proprietary logic lives here.
@@ -10,16 +10,11 @@
 //     never triggers Windows Defender Firewall prompts.
 //   - Physical NIC Binding: Outbound connections bind directly to your physical Wi-Fi/LAN IP
 //     so traffic on a single Windows PC never loops back into the WireGuard tunnel.
-//   - Browser-Only UI: The GitHub Pages HUD serves as both the endpoint status dashboard
-//     and the live telemetry overlay (decoded in-browser via codec.mjs).
 package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +23,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -36,29 +33,51 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-const (
-	defaultHUDURL          = "https://sdoolman.github.io/maplesprint-hud/"
-	ethPAll                = 0x0003
-	etherHeaderLen         = 14
-	etherTypeIPv4          = 0x0800
-	pppHeaderLen           = 4
-	pppCompactHeaderLen    = 2
-	pppProtoIPv4           = 0x0021
-	arphrdEther            = 1
-	arphrdPPP              = 512
-	arphrdNone             = 0xfffe
-	pcapGlobalAndPacketLen = 40 // 24-byte pcap file header + 16-byte packet header
-	pcapMagicLE            = 0xa1b2c3d4
-	nullLoopbackHdrLen     = 16
-)
+// RelayConfig holds all configurable operational parameters for the local endpoint relay.
+type RelayConfig struct {
+	AppName     string
+	DisplayName string
+	LogFileName string
+	IfaceName   string
+	ListenUDP   string
+	HTTPAddr    string
+	OutboundIP  string
+	WGSubnet    string
+	ClientConf  string
+	HUDURL      string
+	NoBrowser   bool
+	SportMin    int
+	SportMax    int
+	Routes      RoutesConfig
+}
 
-// RawChunk is the read-only TCP segment envelope streamed to the browser HUD.
-type RawChunk struct {
-	Type  string `json:"type"`
-	Flow  string `json:"flow"`
-	Seq   uint32 `json:"seq"`
-	Sport uint16 `json:"sport"`
-	Data  string `json:"data"`
+// RoutesConfig parameterizes the HTTP & WebSocket endpoints exposed on the loopback server.
+type RoutesConfig struct {
+	WebSocket  string
+	Status     string
+	ClientConf string
+	Root       string
+}
+
+func DefaultRelayConfig() RelayConfig {
+	return RelayConfig{
+		AppName:     "MapleSprint",
+		DisplayName: "MapleSprint Relay",
+		LogFileName: "relay.log",
+		IfaceName:   "wg0",
+		ListenUDP:   "127.0.0.1:51820",
+		HTTPAddr:    "127.0.0.1:8080",
+		WGSubnet:    "10.66.66.0/24",
+		HUDURL:      "https://sdoolman.github.io/maplesprint-hud/",
+		SportMin:    8484,
+		SportMax:    8999,
+		Routes: RoutesConfig{
+			WebSocket:  "/ws",
+			Status:     "/status",
+			ClientConf: "/MapleSprint.conf",
+			Root:       "/",
+		},
+	}
 }
 
 // EndpointStatus is returned by GET /status for the Setup dashboard in the HUD.
@@ -67,6 +86,7 @@ type EndpointStatus struct {
 	Service        string `json:"service"`
 	Mode           string `json:"mode"`
 	ListenAddr     string `json:"listen_addr"`
+	WGPort         int    `json:"wg_port"`
 	OutboundIP     string `json:"outbound_ip"`
 	PortRange      string `json:"port_range"`
 	PacketsRelayed uint64 `json:"packets_relayed"`
@@ -103,32 +123,38 @@ func (u *UDPPacketSource) ReadPacket(buf []byte) ([]byte, uint16, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	raw := buf[:n]
-	if len(raw) > pcapGlobalAndPacketLen && binary.LittleEndian.Uint32(raw[0:4]) == pcapMagicLE {
-		raw = raw[pcapGlobalAndPacketLen:]
-	} else if len(raw) > 20 && (raw[0]>>4) != 4 && (raw[nullLoopbackHdrLen]>>4) == 4 {
-		raw = raw[nullLoopbackHdrLen:]
-	}
-	return raw, arphrdNone, nil
+	return stripCaptureHeader(buf[:n]), arphrdNone, nil
 }
 
 func (u *UDPPacketSource) Close() error {
 	return u.conn.Close()
 }
 
-func htons(v uint16) uint16 {
-	return (v<<8)&0xff00 | (v>>8)&0x00ff
+var tunnelIfacePrefixes = []string{"wg", "tun", "tap", "utun"}
+
+func isTunnelInterface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range tunnelIfacePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectPhysicalOutboundIP finds the primary non-loopback, non-tunnel LAN IPv4 address
-// so outbound connections bypass the local WireGuard tunnel without routing loops.
-func DetectPhysicalOutboundIP() string {
+// outside the configured WireGuard subnet CIDR so outbound sockets bypass the tunnel.
+func DetectPhysicalOutboundIP(wgSubnetCIDR string) string {
+	var wgNet *net.IPNet
+	if wgSubnetCIDR != "" {
+		_, wgNet, _ = net.ParseCIDR(wgSubnetCIDR)
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
 	for _, iface := range ifaces {
-		if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 {
+		if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 || isTunnelInterface(iface.Name) {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -144,8 +170,7 @@ func DetectPhysicalOutboundIP() string {
 			if ip4 == nil || ip4.IsLoopback() {
 				continue
 			}
-			// Skip the 10.66.66.0/24 WireGuard tunnel subnet
-			if ip4[0] == 10 && ip4[1] == 66 && ip4[2] == 66 {
+			if wgNet != nil && wgNet.Contains(ip4) {
 				continue
 			}
 			return ip4.String()
@@ -171,80 +196,19 @@ func validatePortRange(flagMin, flagMax int) (int, int, error) {
 	return flagMin, flagMax, nil
 }
 
-// stripLinkHeader strips L2/PPP framing and validates the leading IPv4 header nibble.
-func stripLinkHeader(pkt []byte, hatype uint16) ([]byte, bool) {
-	offset := 0
-	switch hatype {
-	case arphrdEther:
-		if len(pkt) < etherHeaderLen || binary.BigEndian.Uint16(pkt[12:14]) != etherTypeIPv4 {
-			return nil, false
-		}
-		offset = etherHeaderLen
-	case arphrdPPP:
-		if len(pkt) >= pppHeaderLen && pkt[0] == 0xff && pkt[1] == 0x03 && binary.BigEndian.Uint16(pkt[2:4]) == pppProtoIPv4 {
-			offset = pppHeaderLen
-		} else if len(pkt) >= pppCompactHeaderLen && binary.BigEndian.Uint16(pkt[0:2]) == pppProtoIPv4 {
-			offset = pppCompactHeaderLen
-		} else if len(pkt) > 0 && (pkt[0]>>4) != 4 {
-			return nil, false
-		}
-	default:
-		if hatype != arphrdNone && len(pkt) > 0 && (pkt[0]>>4) != 4 {
-			return nil, false
-		}
+func parsePortFromAddr(addr string) int {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
 	}
-	ip := pkt[offset:]
-	if len(ip) < 20 || (ip[0]>>4) != 4 {
-		return nil, false
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p < 0 || p > 65535 {
+		return 0
 	}
-	return ip, true
+	return p
 }
 
-// parseTCPPayload extracts the TCP flow tuple, sequence number, source port, and payload
-// from an IPv4 packet. It performs zero game-specific inspection.
-func parseTCPPayload(pkt []byte, hatype uint16) (RawChunk, bool) {
-	ip, ok := stripLinkHeader(pkt, hatype)
-	if !ok {
-		return RawChunk{}, false
-	}
-	ihl := int(ip[0]&0x0f) * 4
-	totalLen := int(binary.BigEndian.Uint16(ip[2:4]))
-	if ihl < 20 || len(ip) < ihl || ip[9] != 6 {
-		return RawChunk{}, false
-	}
-	if totalLen > 0 && totalLen < len(ip) {
-		ip = ip[:totalLen]
-	}
-
-	tcp := ip[ihl:]
-	if len(tcp) < 20 {
-		return RawChunk{}, false
-	}
-	doff := int((tcp[12]>>4)&0x0f) * 4
-	if doff < 20 || len(tcp) < doff {
-		return RawChunk{}, false
-	}
-	payload := tcp[doff:]
-	if len(payload) == 0 {
-		return RawChunk{}, false
-	}
-
-	sport := binary.BigEndian.Uint16(tcp[0:2])
-	dport := binary.BigEndian.Uint16(tcp[2:4])
-	seq := binary.BigEndian.Uint32(tcp[4:8])
-	srcIP := net.IP(ip[12:16]).String()
-	dstIP := net.IP(ip[16:20]).String()
-
-	return RawChunk{
-		Type:  "raw_chunk",
-		Flow:  fmt.Sprintf("%s:%d->%s:%d", srcIP, sport, dstIP, dport),
-		Seq:   seq,
-		Sport: sport,
-		Data:  base64.StdEncoding.EncodeToString(payload),
-	}, true
-}
-
-// RelayHub broadcasts raw TCP chunks over standard WebSockets to the GitHub Pages HUD.
+// RelayHub broadcasts raw TCP chunks over WebSockets to connected HUD clients.
 type RelayHub struct {
 	mu             sync.Mutex
 	clients        map[*websocket.Conn]struct{}
@@ -303,8 +267,7 @@ func (h *RelayHub) ServeWS(ws *websocket.Conn) {
 	}
 }
 
-// withCORS attaches standard CORS and Chrome Private Network Access (PNA) headers
-// so https://sdoolman.github.io/maplesprint-hud/ can query http://127.0.0.1:8080 directly.
+// withCORS attaches CORS and Chrome Private Network Access (PNA) headers.
 func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -357,15 +320,17 @@ func (f *Forwarder) Run(ctx context.Context) error {
 	}
 }
 
-// EndpointServer exposes the loopback HTTP & WebSocket API consumed by the GitHub Pages HUD.
+// EndpointServer exposes the configured loopback HTTP & WebSocket API.
 type EndpointServer struct {
 	mode           string
 	listenTarget   string
+	wgPort         int
 	outboundIP     string
 	clientConfPath string
 	hudURL         string
 	sportMin       int
 	sportMax       int
+	routes         RoutesConfig
 	hub            *RelayHub
 }
 
@@ -375,18 +340,17 @@ func (s *EndpointServer) Handler() http.Handler {
 		Handshake: func(_ *websocket.Config, _ *http.Request) error { return nil },
 		Handler:   s.hub.ServeWS,
 	}
-	mux.Handle("/ws", wsServer)
-	mux.Handle("/room/local/ws", wsServer)
-	mux.HandleFunc("/status", withCORS(s.handleStatus))
-	mux.HandleFunc("/MapleSprint.conf", withCORS(s.handleClientConf))
-	mux.HandleFunc("/", withCORS(s.handleRootRedirect))
+	mux.Handle(s.routes.WebSocket, wsServer)
+	mux.HandleFunc(s.routes.Status, withCORS(s.handleStatus))
+	mux.HandleFunc(s.routes.ClientConf, withCORS(s.handleClientConf))
+	mux.HandleFunc(s.routes.Root, withCORS(s.handleRootRedirect))
 	return mux
 }
 
 func (s *EndpointServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	confOK := false
 	if s.clientConfPath != "" {
-		if _, err := os.Stat(s.clientConfPath); err == nil {
+		if info, err := os.Stat(s.clientConfPath); err == nil && info.Mode().IsRegular() {
 			confOK = true
 		}
 	}
@@ -396,6 +360,7 @@ func (s *EndpointServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		Service:        "maplesprint-endpoint",
 		Mode:           s.mode,
 		ListenAddr:     s.listenTarget,
+		WGPort:         s.wgPort,
 		OutboundIP:     s.outboundIP,
 		PortRange:      fmt.Sprintf("%d-%d", s.sportMin, s.sportMax),
 		PacketsRelayed: s.hub.packetsRelayed.Load(),
@@ -437,51 +402,56 @@ func startAPIServer(ctx context.Context, addr string, srvCfg *EndpointServer) {
 	}()
 	go func() {
 		log.Printf("endpoint API ready on http://%s (UI: %s)", addr, srvCfg.hudURL)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("http server error: %v", err)
 		}
 	}()
 }
 
-func main() {
-	ifaceName := flag.String("iface", "wg0", "WireGuard interface to capture (Linux)")
-	listenUDP := flag.String("listen-udp", "127.0.0.1:51820", "Localhost UDP address for unprivileged packet relay")
-	httpAddr := flag.String("http", "127.0.0.1:8080", "Localhost API & WebSocket address for the GitHub Pages HUD")
-	outboundIP := flag.String("outbound-ip", "", "Physical LAN IPv4 for outbound NIC binding (auto-detected if empty)")
-	clientConf := flag.String("client-conf", "", "Optional path to MapleSprint.conf for 1-click download from the HUD")
-	hudURL := flag.String("hud-url", defaultHUDURL, "GitHub Pages HUD URL")
-	noBrowser := flag.Bool("no-browser", false, "Do not automatically open the HUD in your browser on startup")
-	sportMinFlag := flag.Int("sport-min", 8484, "Minimum TCP source port (default 8484)")
-	sportMaxFlag := flag.Int("sport-max", 8999, "Maximum TCP source port (default 8999)")
+func parseFlags() RelayConfig {
+	cfg := DefaultRelayConfig()
+	flag.StringVar(&cfg.IfaceName, "iface", cfg.IfaceName, "WireGuard interface to capture (Linux)")
+	flag.StringVar(&cfg.ListenUDP, "listen-udp", cfg.ListenUDP, "Localhost UDP address for unprivileged packet relay")
+	flag.StringVar(&cfg.HTTPAddr, "http", cfg.HTTPAddr, "Localhost API & WebSocket address for the GitHub Pages HUD")
+	flag.StringVar(&cfg.OutboundIP, "outbound-ip", "", "Physical LAN IPv4 for outbound NIC binding (auto-detected if empty)")
+	flag.StringVar(&cfg.WGSubnet, "wg-subnet", cfg.WGSubnet, "WireGuard subnet CIDR excluded during physical NIC detection")
+	flag.StringVar(&cfg.ClientConf, "client-conf", "", "Optional path to MapleSprint.conf for 1-click download from the HUD")
+	flag.StringVar(&cfg.HUDURL, "hud-url", cfg.HUDURL, "GitHub Pages HUD URL")
+	flag.BoolVar(&cfg.NoBrowser, "no-browser", false, "Do not automatically open the HUD in your browser on startup")
+	flag.IntVar(&cfg.SportMin, "sport-min", cfg.SportMin, "Minimum TCP source port")
+	flag.IntVar(&cfg.SportMax, "sport-max", cfg.SportMax, "Maximum TCP source port")
 	flag.Parse()
+	return cfg
+}
 
-	logPath, closeLog := setupLogging()
+func openPacketSource(cfg RelayConfig) (PacketSource, string, string, int, error) {
+	if cfg.ListenUDP != "" {
+		src, err := OpenUDPPacketSource(cfg.ListenUDP)
+		return src, "udp-loopback", cfg.ListenUDP, parsePortFromAddr(cfg.ListenUDP), err
+	}
+	src, err := OpenRawSocketSource(cfg.IfaceName, ethPAll)
+	return src, "interface", cfg.IfaceName, 0, err
+}
+
+func main() {
+	cfg := parseFlags()
+	logPath, logDir, closeLog := setupLogging(cfg)
 	defer closeLog()
 
-	sportMin, sportMax, err := validatePortRange(*sportMinFlag, *sportMaxFlag)
+	sportMin, sportMax, err := validatePortRange(cfg.SportMin, cfg.SportMax)
 	if err != nil {
 		log.Fatal(err)
 	}
+	if _, err := validateHTTPURL(cfg.HUDURL); err != nil {
+		log.Fatalf("invalid --hud-url: %v", err)
+	}
 
-	physIP := *outboundIP
+	physIP := cfg.OutboundIP
 	if physIP == "" {
-		physIP = DetectPhysicalOutboundIP()
+		physIP = DetectPhysicalOutboundIP(cfg.WGSubnet)
 	}
 
-	var (
-		source PacketSource
-		mode   string
-		target string
-	)
-	if *listenUDP != "" {
-		mode = "udp-loopback"
-		target = *listenUDP
-		source, err = OpenUDPPacketSource(*listenUDP)
-	} else {
-		mode = "interface"
-		target = *ifaceName
-		source, err = OpenRawSocketSource(*ifaceName)
-	}
+	source, mode, target, wgPort, err := openPacketSource(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -493,27 +463,29 @@ func main() {
 	defer stop()
 
 	fwd := NewForwarder(source, sportMin, sportMax)
-	startAPIServer(ctx, *httpAddr, &EndpointServer{
+	startAPIServer(ctx, cfg.HTTPAddr, &EndpointServer{
 		mode:           mode,
 		listenTarget:   target,
+		wgPort:         wgPort,
 		outboundIP:     physIP,
-		clientConfPath: *clientConf,
-		hudURL:         *hudURL,
+		clientConfPath: cfg.ClientConf,
+		hudURL:         cfg.HUDURL,
 		sportMin:       sportMin,
 		sportMax:       sportMax,
+		routes:         cfg.Routes,
 		hub:            fwd.hub,
 	})
 
-	if !*noBrowser {
-		openBrowser(*hudURL)
+	if !cfg.NoBrowser {
+		openBrowser(cfg.HUDURL)
 	}
 
 	go func() {
-		if err := fwd.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := fwd.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("forwarder stopped: %v", err)
 			stop()
 		}
 	}()
 
-	runTray(ctx, stop, *hudURL, logPath)
+	runTray(ctx, stop, cfg, logPath, logDir)
 }

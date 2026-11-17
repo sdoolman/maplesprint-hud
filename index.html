@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261117a" />
+  <link rel="stylesheet" href="style.css?v=20261117b" />
 </head>
 <body>
   <main class="wrap">
@@ -36,8 +36,8 @@
         <div class="hud-main">
           <section class="card level-card">
             <div class="level-header">
-              <div class="level-identity">
-                <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="200" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
+            <div class="level-identity">
+                <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="100" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
                 <span id="charJob" class="job-badge">Beginner</span>
               </div>
               <div class="level-eta">
@@ -109,12 +109,12 @@
       <section class="card guide-controls">
         <div class="guide-header-text">
           <h2>Classic World — Optimal Maps by Level &amp; Class</h2>
-          <p class="muted">Ranked from catalog spawn data by mob level window, EXP-to-HP ratio, spawn density, class affinity, and your live recorded telemetry splits.</p>
+          <p class="muted">Ranked by transparent Level Fit (0–35), EXP / 100 HP efficiency (0–35), Spawn Density (0–30), and explicit OSMS elemental/undead synergy.</p>
         </div>
         <div class="guide-filters">
           <label class="filter-field">
             <span class="label">YOUR LEVEL</span>
-            <input id="guideLevel" type="number" min="1" max="200" value="25" />
+            <input id="guideLevel" type="number" min="1" max="100" value="25" />
           </label>
           <label class="filter-field">
             <span class="label">CLASS / JOB</span>
@@ -232,6 +232,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261117a"></script>
+  <script type="module" src="js/main.js?v=20261117b"></script>
 </body>
 </html>

@@ -7,26 +7,28 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-func buildIPv4TCPPacket(srcIP, dstIP [4]byte, sport, dport uint16, seq uint32, payload []byte) []byte {
-	totalLen := 20 + 20 + len(payload)
+func buildIPv4TCPPacket(srcIP, dstIP [ipv4AddrLen]byte, sport, dport uint16, seq uint32, payload []byte) []byte {
+	totalLen := ipv4MinHdrLen + tcpMinHdrLen + len(payload)
 	pkt := make([]byte, totalLen)
-	pkt[0] = 0x45 // IPv4, IHL=5
-	binary.BigEndian.PutUint16(pkt[2:4], uint16(totalLen))
-	pkt[9] = 6 // TCP
-	copy(pkt[12:16], srcIP[:])
-	copy(pkt[16:20], dstIP[:])
+	pkt[0] = ipv4VerIHLDefault
+	binary.BigEndian.PutUint16(pkt[ipv4OffTotalLen:ipv4OffTotalLen+2], uint16(totalLen))
+	pkt[ipv4OffProto] = ipProtoTCP
+	copy(pkt[ipv4OffSrcIP:ipv4OffSrcIP+ipv4AddrLen], srcIP[:])
+	copy(pkt[ipv4OffDstIP:ipv4OffDstIP+ipv4AddrLen], dstIP[:])
 
-	tcp := pkt[20:]
-	binary.BigEndian.PutUint16(tcp[0:2], sport)
-	binary.BigEndian.PutUint16(tcp[2:4], dport)
-	binary.BigEndian.PutUint32(tcp[4:8], seq)
-	tcp[12] = 0x50 // data offset = 5 (20 bytes)
-	copy(tcp[20:], payload)
+	tcp := pkt[ipv4MinHdrLen:]
+	binary.BigEndian.PutUint16(tcp[tcpOffSrcPort:tcpOffSrcPort+2], sport)
+	binary.BigEndian.PutUint16(tcp[tcpOffDstPort:tcpOffDstPort+2], dport)
+	binary.BigEndian.PutUint32(tcp[tcpOffSeq:tcpOffSeq+4], seq)
+	tcp[tcpOffDataOffset] = tcpDataOffset5Words
+	copy(tcp[tcpMinHdrLen:], payload)
 	return pkt
 }
 
@@ -44,27 +46,27 @@ func TestParseTCPPayloadL3AndL2AndPPP(t *testing.T) {
 		t.Fatalf("unexpected payload: %q", got)
 	}
 
-	// L2 Ethernet frame wrapping IPv4 (EtherType 0x0800)
-	eth := make([]byte, 14+len(rawIP))
-	binary.BigEndian.PutUint16(eth[12:14], 0x0800)
-	copy(eth[14:], rawIP)
+	// L2 Ethernet frame wrapping IPv4
+	eth := make([]byte, etherHeaderLen+len(rawIP))
+	binary.BigEndian.PutUint16(eth[etherOffType:etherHeaderLen], etherTypeIPv4)
+	copy(eth[etherHeaderLen:], rawIP)
 	c2, ok := parseTCPPayload(eth, arphrdEther)
 	if !ok || c2.Sport != 443 {
 		t.Fatalf("expected L2 Ethernet packet to parse, got ok=%v chunk=%+v", ok, c2)
 	}
 
-	// PPP frame wrapping IPv4 (0xff 0x03 0x00 0x21)
-	ppp := make([]byte, 4+len(rawIP))
-	ppp[0] = 0xff
-	ppp[1] = 0x03
-	binary.BigEndian.PutUint16(ppp[2:4], 0x0021)
-	copy(ppp[4:], rawIP)
+	// PPP frame wrapping IPv4
+	ppp := make([]byte, pppHeaderLen+len(rawIP))
+	ppp[0] = pppAddrCtrl0
+	ppp[1] = pppAddrCtrl1
+	binary.BigEndian.PutUint16(ppp[pppOffProtoFull:pppHeaderLen], pppProtoIPv4)
+	copy(ppp[pppHeaderLen:], rawIP)
 	c3, ok := parseTCPPayload(ppp, arphrdPPP)
 	if !ok || c3.Flow != c.Flow || c3.Seq != c.Seq || c3.Data != c.Data {
 		t.Fatalf("expected PPP packet to parse, got ok=%v chunk=%+v", ok, c3)
 	}
 
-	// Empty-payload ACK should be ignored
+	// Empty-payload ACK must be ignored
 	ack := buildIPv4TCPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 2}, 443, 51000, 1, nil)
 	if _, ok := parseTCPPayload(ack, arphrdNone); ok {
 		t.Fatal("expected empty TCP ACK to be ignored")
@@ -100,38 +102,58 @@ func TestUDPPacketSource(t *testing.T) {
 	}
 }
 
-func TestPhysicalNICDialerBinding(t *testing.T) {
+func TestPhysicalNICDialerAndValidation(t *testing.T) {
 	d := NewPhysicalNICDialer("192.168.1.50", 5*time.Second)
 	tcpAddr, ok := d.LocalAddr.(*net.TCPAddr)
 	if !ok || tcpAddr.IP.String() != "192.168.1.50" {
 		t.Fatalf("expected LocalAddr bound to 192.168.1.50, got %+v", d.LocalAddr)
 	}
-}
 
-func TestValidatePortRange(t *testing.T) {
-	min, max, err := validatePortRange(8484, 8999)
-	if err != nil || min != 8484 || max != 8999 {
-		t.Fatalf("expected valid 8484-8999, got %d-%d (err=%v)", min, max, err)
+	if _, _, err := validatePortRange(8484, 8999); err != nil {
+		t.Fatalf("expected valid port range, got %v", err)
 	}
 	if _, _, err := validatePortRange(9000, 8000); err == nil {
 		t.Fatal("expected error for inverted port range")
 	}
+
+	if _, err := validateHTTPURL("https://sdoolman.github.io/maplesprint-hud/"); err != nil {
+		t.Fatalf("expected valid https URL, got %v", err)
+	}
+	for _, bad := range []string{"javascript:alert(1)", "file:///C:/Windows/calc.exe", "ms-msdt:/id", "not a url"} {
+		if _, err := validateHTTPURL(bad); err == nil {
+			t.Fatalf("expected %q to be rejected by validateHTTPURL", bad)
+		}
+	}
+
+	tmpDir := t.TempDir()
+	goodLog := filepath.Join(tmpDir, "relay.log")
+	if err := os.WriteFile(goodLog, []byte("ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateLogPath(goodLog, tmpDir); err != nil {
+		t.Fatalf("expected valid log file, got %v", err)
+	}
+	if _, err := validateLogPath(filepath.Join(tmpDir, "..", "evil.exe"), tmpDir); err == nil {
+		t.Fatal("expected path traversal / wrong extension to be rejected")
+	}
 }
 
 func TestEndpointServerRoutesAndPNA(t *testing.T) {
+	cfg := DefaultRelayConfig()
 	srv := &EndpointServer{
 		mode:         "udp-loopback",
-		listenTarget: "127.0.0.1:51820",
+		listenTarget: "127.0.0.1:51821",
+		wgPort:       51821,
 		outboundIP:   "192.168.1.50",
-		hudURL:       "https://sdoolman.github.io/maplesprint-hud/",
-		sportMin:     8484,
-		sportMax:     8999,
+		hudURL:       cfg.HUDURL,
+		sportMin:     cfg.SportMin,
+		sportMax:     cfg.SportMax,
+		routes:       cfg.Routes,
 		hub:          NewRelayHub(),
 	}
 	h := srv.Handler()
 
-	// OPTIONS preflight should include Private Network Access header
-	reqOpt := httptest.NewRequest(http.MethodOptions, "/status", nil)
+	reqOpt := httptest.NewRequest(http.MethodOptions, cfg.Routes.Status, nil)
 	recOpt := httptest.NewRecorder()
 	h.ServeHTTP(recOpt, reqOpt)
 	if recOpt.Code != http.StatusNoContent {
@@ -141,8 +163,7 @@ func TestEndpointServerRoutesAndPNA(t *testing.T) {
 		t.Fatal("missing Access-Control-Allow-Private-Network header")
 	}
 
-	// GET /status returns valid JSON metadata
-	reqSt := httptest.NewRequest(http.MethodGet, "/status", nil)
+	reqSt := httptest.NewRequest(http.MethodGet, cfg.Routes.Status, nil)
 	recSt := httptest.NewRecorder()
 	h.ServeHTTP(recSt, reqSt)
 	if recSt.Code != http.StatusOK {
@@ -152,19 +173,17 @@ func TestEndpointServerRoutesAndPNA(t *testing.T) {
 	if err := json.Unmarshal(recSt.Body.Bytes(), &st); err != nil {
 		t.Fatalf("invalid status JSON: %v", err)
 	}
-	if !st.OK || st.PortRange != "8484-8999" || st.OutboundIP != "192.168.1.50" {
+	if !st.OK || st.WGPort != 51821 || st.PortRange != "8484-8999" || st.OutboundIP != "192.168.1.50" {
 		t.Fatalf("unexpected status payload: %+v", st)
 	}
 
-	// GET / redirects to GitHub Pages HUD with ?endpoint=
 	reqRoot := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
 	recRoot := httptest.NewRecorder()
 	h.ServeHTTP(recRoot, reqRoot)
 	if recRoot.Code != http.StatusFound {
 		t.Fatalf("expected 302 redirect on /, got %d", recRoot.Code)
 	}
-	loc := recRoot.Header().Get("Location")
-	if !strings.Contains(loc, "endpoint=http%3A%2F%2F127.0.0.1%3A8080") {
-		t.Fatalf("unexpected redirect target: %s", loc)
+	if !strings.Contains(recRoot.Header().Get("Location"), "endpoint=http%3A%2F%2F127.0.0.1%3A8080") {
+		t.Fatalf("unexpected redirect target: %s", recRoot.Header().Get("Location"))
 	}
 }

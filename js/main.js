@@ -5,8 +5,8 @@ import {
   AUTO_PAUSE_IDLE_MS,
   CLASSIC_EXP_TABLE,
   DEFAULT_DB,
-  DEFAULT_LOCAL_ENDPOINT,
   JOB_NAMES,
+  MAX_CLASSIC_LEVEL,
   ROLLING_WINDOW_MS,
   base64ToBytes,
   formatCompact,
@@ -14,6 +14,7 @@ import {
   requireEl,
 } from "./constants.js";
 import { fetchCatalog } from "./catalog.js";
+import { ENDPOINT_CONFIG, EndpointClient, fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "./endpoint.js";
 import { renderGuideHtml, renderSplitsHtml } from "./guide.js";
 import { PipOverlay } from "./pip.js";
 
@@ -84,10 +85,9 @@ endpointInput.value =
   params.get("worker") ||
   localStorage.getItem("ms_endpoint") ||
   localStorage.getItem("ms_worker") ||
-  DEFAULT_LOCAL_ENDPOINT;
-const activeRoomId = params.get("room") || "local";
+  ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117a", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117b", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -120,7 +120,7 @@ const state = {
   sessionExp: 0,
   lastExp: 0,
   totalExp: 0,
-  level: Number(localStorage.getItem("ms_char_level")) || 1,
+  level: Math.min(MAX_CLASSIC_LEVEL, Math.max(1, Number(localStorage.getItem("ms_char_level")) || 1)),
   job: Number(localStorage.getItem("ms_char_job")) || 0,
   kills: 0,
   lastMobId: /** @type {number | null} */ (null),
@@ -138,6 +138,7 @@ const state = {
   ch: /** @type {number | null} */ (null),
   events: 0,
   rawChunksReceived: 0,
+  observedWgPort: ENDPOINT_CONFIG.defaultWgPort,
   /** @type {Array<{ ts: number, gain: number }>} */ expWindow: [],
   mapSplits: loadSavedSplits(),
   currentSplit: /** @type {any | null} */ (null),
@@ -177,7 +178,7 @@ async function initCodec() {
       wasmNodeDetail.classList.add("online");
       return;
     } catch {
-      // Try next candidate
+      // Try fallback codec candidate
     }
   }
 
@@ -201,68 +202,93 @@ function ingestRawChunk(flow, seq, b64Data) {
   }
 }
 
-async function probeEndpointStatus() {
-  const base = endpointInput.value.trim().replace(/\/+$/, "");
-  if (!base) {
+function applyEndpointProbeUI(result) {
+  if (result.invalid) {
+    endpointStatusBadge.textContent = result.error;
+    endpointStatusBadge.classList.remove("online");
     connectBtn.disabled = true;
-    connectBtn.textContent = "Enter Endpoint URL";
+    connectBtn.textContent = "Invalid URL";
     return;
   }
-  try {
-    const res = await fetch(`${base}/status`, { cache: "no-store" });
-    if (!res.ok) throw new Error("Status unavailable");
-    const st = await res.json();
+  if (result.ok && result.status) {
+    const st = result.status;
     endpointStatusBadge.textContent = `ONLINE (${st.mode || "relay"})`;
     endpointStatusBadge.classList.add("online");
     connectBtn.disabled = false;
-    connectBtn.textContent = ws && ws.readyState === WebSocket.OPEN ? "Reconnect Endpoint" : "Connect Endpoint";
+    connectBtn.textContent = endpointClient.isOpen() ? "Reconnect Endpoint" : "Connect Endpoint";
     connectBtn.title = "Connect to local endpoint WebSocket";
-    if (st.outbound_ip) {
-      outboundIpTag.textContent = `Outbound NIC: ${st.outbound_ip} (No-Loop)`;
+    if (typeof st.wg_port === "number" && st.wg_port > 0) {
+      state.observedWgPort = st.wg_port;
+      if (!state.rawChunksReceived && !(st.packets_relayed > 0)) {
+        wgTunnelStatus.textContent = `Waiting (:${st.wg_port})`;
+      }
     }
+    if (st.outbound_ip) outboundIpTag.textContent = `Outbound NIC: ${st.outbound_ip} (No-Loop)`;
     if (typeof st.packets_relayed === "number" && st.packets_relayed > 0) {
       wgTunnelStatus.textContent = `Active (${st.packets_relayed.toLocaleString()} pkts)`;
       wgTunnelStatus.classList.add("online");
     }
-  } catch {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      endpointStatusBadge.textContent = "Connected (Remote)";
-      endpointStatusBadge.classList.add("online");
-      connectBtn.disabled = false;
-      connectBtn.textContent = "Reconnect Endpoint";
-    } else {
-      endpointStatusBadge.textContent = "Offline — Start relay";
-      endpointStatusBadge.classList.remove("online");
-      connectBtn.disabled = true;
-      connectBtn.textContent = "Endpoint Offline";
-      connectBtn.title = "Start the endpoint relay binary on 127.0.0.1:8080 first";
-    }
+    return;
+  }
+
+  if (endpointClient.isOpen()) {
+    endpointStatusBadge.textContent = "Connected (Active)";
+    endpointStatusBadge.classList.add("online");
+    connectBtn.disabled = false;
+    connectBtn.textContent = "Reconnect Endpoint";
+  } else {
+    endpointStatusBadge.textContent = "Offline — Start relay";
+    endpointStatusBadge.classList.remove("online");
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Endpoint Offline";
+    connectBtn.title = "Start the endpoint relay binary first";
   }
 }
 
+async function refreshEndpointStatus() {
+  const result = await probeEndpoint(endpointInput.value);
+  applyEndpointProbeUI(result);
+}
+
+const endpointClient = new EndpointClient({
+  onOpen() {
+    statusDot.textContent = "LIVE";
+    statusDot.className = "pill live";
+    endpointStatusBadge.textContent = "ONLINE (Connected)";
+    endpointStatusBadge.classList.add("online");
+    if (state.mapId === null) mapLine.textContent = "Connected — waiting for WireGuard game traffic...";
+  },
+  onClose() {
+    statusDot.textContent = "OFFLINE";
+    statusDot.className = "pill offline";
+    if (state.mapId === null) mapLine.textContent = "Not connected";
+  },
+  onError(reason) {
+    statusDot.textContent = "ERROR";
+    statusDot.className = "pill offline";
+    endpointStatusBadge.textContent = reason;
+    endpointStatusBadge.classList.remove("online");
+  },
+  onMessage(rawJson) {
+    handleServerMessage(rawJson);
+  },
+});
+
+function connectToEndpoint() {
+  const check = sanitizeEndpointUrl(endpointInput.value);
+  if (!check.ok) {
+    endpointStatusBadge.textContent = check.error;
+    endpointStatusBadge.classList.remove("online");
+    return;
+  }
+  localStorage.setItem("ms_endpoint", check.httpBase);
+  localStorage.setItem("ms_db", dbSourceSelect.value || DEFAULT_DB);
+  refreshEndpointStatus();
+  endpointClient.connect(check.httpBase);
+}
+
 downloadWgConfBtn.addEventListener("click", async () => {
-  const base = endpointInput.value.trim().replace(/\/+$/, "");
-  let text = "";
-  if (base) {
-    try {
-      const res = await fetch(`${base}/MapleSprint.conf`);
-      if (res.ok) text = await res.text();
-    } catch {}
-  }
-  if (!text) {
-    text = [
-      "[Interface]",
-      "PrivateKey = <CLIENT_PRIVATE_KEY>",
-      "Address = 10.66.66.2/32",
-      "",
-      "[Peer]",
-      "PublicKey = <ENDPOINT_PUBLIC_KEY>",
-      "Endpoint = 127.0.0.1:51820",
-      "AllowedIPs = 158.115.192.0/19",
-      "PersistentKeepalive = 25",
-      "",
-    ].join("\n");
-  }
+  const text = await fetchWireGuardConf(endpointInput.value, state.observedWgPort);
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -419,28 +445,34 @@ function render() {
   }
 
   charJobEl.textContent = JOB_NAMES[state.job] || `Job #${state.job}`;
-  const reqExp = CLASSIC_EXP_TABLE[Math.min(200, Math.max(1, state.level))] || 0;
-  let pct = 0;
-  if (reqExp > 0 && state.totalExp > 0) {
-    pct = Math.min(99.99, Math.max(0, (state.totalExp / reqExp) * 100));
-  } else if (reqExp > 0 && state.sessionExp > 0) {
-    pct = Math.min(99.99, Math.max(0, ((state.sessionExp % reqExp) / reqExp) * 100));
-  }
-  levelPctEl.textContent = `${pct.toFixed(2)}%`;
-  levelProgressBar.style.width = `${pct.toFixed(2)}%`;
-
-  const rateForEta = rolling5m > 0 ? rolling5m : xphVal;
-  if (reqExp > 0 && rateForEta > 0) {
-    const curInLevel = state.totalExp > 0 ? Math.min(reqExp, state.totalExp) : state.sessionExp % reqExp;
-    const minsLeft = (Math.max(0, reqExp - curInLevel) / rateForEta) * 60;
-    ttlEl.textContent =
-      minsLeft < 1
-        ? "ETA < 1m"
-        : minsLeft < 60
-        ? `ETA ${Math.ceil(minsLeft)}m`
-        : `ETA ${Math.floor(minsLeft / 60)}h ${Math.round(minsLeft % 60)}m`;
+  const reqExp = CLASSIC_EXP_TABLE[state.level] || 0;
+  if (state.level >= MAX_CLASSIC_LEVEL || reqExp <= 0) {
+    levelPctEl.textContent = "MAX";
+    levelProgressBar.style.width = "100%";
+    ttlEl.textContent = "Lv. Cap";
   } else {
-    ttlEl.textContent = "ETA —";
+    let pct = 0;
+    if (state.totalExp > 0) {
+      pct = Math.min(99.99, Math.max(0, (state.totalExp / reqExp) * 100));
+    } else if (state.sessionExp > 0) {
+      pct = Math.min(99.99, Math.max(0, ((state.sessionExp % reqExp) / reqExp) * 100));
+    }
+    levelPctEl.textContent = `${pct.toFixed(2)}%`;
+    levelProgressBar.style.width = `${pct.toFixed(2)}%`;
+
+    const rateForEta = rolling5m > 0 ? rolling5m : xphVal;
+    if (rateForEta > 0) {
+      const curInLevel = state.totalExp > 0 ? Math.min(reqExp, state.totalExp) : state.sessionExp % reqExp;
+      const minsLeft = (Math.max(0, reqExp - curInLevel) / rateForEta) * 60;
+      ttlEl.textContent =
+        minsLeft < 1
+          ? "ETA < 1m"
+          : minsLeft < 60
+          ? `ETA ${Math.ceil(minsLeft)}m`
+          : `ETA ${Math.floor(minsLeft / 60)}h ${Math.round(minsLeft % 60)}m`;
+    } else {
+      ttlEl.textContent = "ETA —";
+    }
   }
 
   let currentMapName = "";
@@ -455,7 +487,7 @@ function render() {
     xphVal,
     rolling5m,
     level: state.level,
-    pct,
+    pct: parseFloat(levelPctEl.textContent) || 0,
     etaText: ttlEl.textContent,
     isGrinding,
     mapName: currentMapName,
@@ -507,13 +539,13 @@ function handleEvent(ev) {
       break;
     }
     case "char_stats":
-      if (ev.level && ev.level >= 1) {
+      if (ev.level >= 1 && ev.level <= MAX_CLASSIC_LEVEL) {
         state.level = ev.level;
         manualLevelInput.value = String(state.level);
         guideLevelInput.value = String(state.level);
         localStorage.setItem("ms_char_level", String(state.level));
       }
-      if (ev.job !== null && ev.job !== undefined) {
+      if (ev.job != null) {
         state.job = ev.job;
         localStorage.setItem("ms_char_job", String(state.job));
       }
@@ -521,8 +553,8 @@ function handleEvent(ev) {
       if (ev.max_mp) state.maxMp = ev.max_mp;
       break;
     case "hp_mp":
-      if (ev.hp !== null && ev.hp !== undefined) state.hp = ev.hp;
-      if (ev.mp !== null && ev.mp !== undefined) state.mp = ev.mp;
+      if (ev.hp != null) state.hp = ev.hp;
+      if (ev.mp != null) state.mp = ev.mp;
       if (ev.max_hp) state.maxHp = ev.max_hp;
       if (ev.max_mp) state.maxMp = ev.max_mp;
       if (ev.damage_taken) {
@@ -589,7 +621,7 @@ function handleEvent(ev) {
 }
 
 function renderGuide() {
-  const charLv = Math.max(1, Math.min(200, Number(guideLevelInput.value) || state.level || 25));
+  const charLv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(guideLevelInput.value) || state.level || 25));
   guideListEl.innerHTML = renderGuideHtml({
     loaded: db.loaded,
     guideMaps: db.guideMaps,
@@ -604,10 +636,6 @@ function renderGuide() {
 function renderSplitsTable() {
   splitsTableBody.innerHTML = renderSplitsHtml(state.mapSplits, db.maps);
 }
-
-/** @type {WebSocket | null} */ let ws = null;
-/** @type {number | null} */ let reconnectTimer = null;
-let reconnectDelayMs = 1500;
 
 function handleServerMessage(rawJson) {
   let msg;
@@ -634,7 +662,7 @@ function handleServerMessage(rawJson) {
     if (d.map_id != null) state.mapId = d.map_id;
     if (d.channel != null) state.ch = d.channel;
     if (d.total_exp) state.totalExp = d.total_exp;
-    if (d.level >= 1) {
+    if (d.level >= 1 && d.level <= MAX_CLASSIC_LEVEL) {
       state.level = d.level;
       manualLevelInput.value = String(state.level);
       guideLevelInput.value = String(state.level);
@@ -672,52 +700,6 @@ function handleServerMessage(rawJson) {
   }
 }
 
-function scheduleReconnect() {
-  if (reconnectTimer !== null || !endpointInput.value.trim()) return;
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = null;
-    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 15000);
-    connect();
-  }, reconnectDelayMs);
-}
-
-function connect() {
-  const base = endpointInput.value.trim().replace(/\/+$/, "");
-  if (!base) return;
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  localStorage.setItem("ms_endpoint", base);
-  localStorage.setItem("ms_db", dbSourceSelect.value || DEFAULT_DB);
-  probeEndpointStatus();
-
-  if (ws) ws.close();
-  const isLocalEndpoint = base.includes("127.0.0.1") || base.includes("localhost") || base.includes(":8080");
-  const wsPath = isLocalEndpoint && activeRoomId === "local" ? "/ws" : `/room/${encodeURIComponent(activeRoomId)}?role=hud`;
-  ws = new WebSocket(base.replace(/^http/, "ws") + wsPath);
-
-  ws.onopen = () => {
-    reconnectDelayMs = 1500;
-    statusDot.textContent = "LIVE";
-    statusDot.className = "pill live";
-    endpointStatusBadge.textContent = "ONLINE (Connected)";
-    endpointStatusBadge.classList.add("online");
-    if (state.mapId === null) mapLine.textContent = "Connected — waiting for WireGuard game traffic...";
-  };
-  ws.onerror = () => {
-    statusDot.textContent = "ERROR";
-    statusDot.className = "pill offline";
-  };
-  ws.onclose = () => {
-    statusDot.textContent = "OFFLINE";
-    statusDot.className = "pill offline";
-    if (state.mapId === null) mapLine.textContent = "Not connected";
-    scheduleReconnect();
-  };
-  ws.onmessage = (e) => handleServerMessage(e.data);
-}
-
 function switchTab(tabName) {
   for (const [btn, view, key] of [
     [tabHud, viewHud, "hud"],
@@ -741,7 +723,7 @@ tabSetup.addEventListener("click", () => switchTab("setup"));
 pipBtn.addEventListener("click", () => pipOverlay.toggle(render));
 
 manualLevelInput.addEventListener("change", () => {
-  const lv = Math.max(1, Math.min(200, Number(manualLevelInput.value) || 1));
+  const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
   state.level = lv;
   manualLevelInput.value = String(lv);
   guideLevelInput.value = String(lv);
@@ -777,10 +759,10 @@ dbSourceSelect.addEventListener("change", () => {
 
 connectBtn.addEventListener("click", () => {
   if (Object.keys(db.mobs).length === 0) loadCatalog();
-  connect();
+  connectToEndpoint();
 });
 
-requireEl("resetBtn").addEventListener("click", async () => {
+requireEl("resetBtn").addEventListener("click", () => {
   clearPendingKill();
   state.startTs = null;
   state.activeMs = 0;
@@ -807,7 +789,7 @@ requireEl("resetBtn").addEventListener("click", async () => {
     codecEngine.decoder.reset();
   }
   feedEl.replaceChildren();
-  mapLine.textContent = ws && ws.readyState === WebSocket.OPEN ? "Connected — waiting for WireGuard game traffic..." : "Not connected";
+  mapLine.textContent = endpointClient.isOpen() ? "Connected — waiting for WireGuard game traffic..." : "Not connected";
   render();
 });
 
@@ -878,9 +860,9 @@ setInterval(() => {
   if (state.startTs) render();
 }, 1000);
 
-setInterval(probeEndpointStatus, 5000);
+setInterval(refreshEndpointStatus, ENDPOINT_CONFIG.probeIntervalMs);
 
 initCodec();
 loadCatalog();
-probeEndpointStatus();
-if (endpointInput.value.trim()) connect();
+refreshEndpointStatus();
+if (endpointInput.value.trim()) connectToEndpoint();

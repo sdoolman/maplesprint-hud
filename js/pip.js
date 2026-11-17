@@ -3,14 +3,26 @@
 
 import { formatCompact } from "./constants.js";
 
+export const DEFAULT_PIP_CONFIG = Object.freeze({
+  width: 340,
+  height: 145,
+  fallbackHeight: 160,
+  windowName: "MapleSprintMini",
+  defaultTitle: "MapleSprint Mini",
+});
+
 /**
  * Manages the always-on-top Document Picture-in-Picture mini overlay using DOM APIs
  * and an external stylesheet (pip.css) instead of inline HTML template strings.
  */
 export class PipOverlay {
-  /** @param {string} cssHref */
-  constructor(cssHref) {
+  /**
+   * @param {string} cssHref
+   * @param {typeof DEFAULT_PIP_CONFIG} [config]
+   */
+  constructor(cssHref, config = DEFAULT_PIP_CONFIG) {
     this.cssHref = cssHref;
+    this.config = { ...DEFAULT_PIP_CONFIG, ...config };
     /** @type {Window | null} */
     this.win = null;
     this.els = {
@@ -30,23 +42,28 @@ export class PipOverlay {
       return;
     }
 
+    const { width, height, fallbackHeight, windowName, defaultTitle } = this.config;
     let win = null;
     if ("documentPictureInPicture" in window) {
       try {
         // @ts-ignore
-        win = await window.documentPictureInPicture.requestWindow({ width: 340, height: 145 });
+        win = await window.documentPictureInPicture.requestWindow({ width, height });
       } catch {
         win = null;
       }
     }
     if (!win) {
-      win = window.open("", "MapleSprintMini", "width=340,height=160,menubar=no,toolbar=no,location=no,status=no");
+      win = window.open(
+        "",
+        windowName,
+        `width=${width},height=${fallbackHeight},menubar=no,toolbar=no,location=no,status=no`
+      );
     }
     if (!win) return;
 
     this.win = win;
     const d = win.document;
-    d.title = "MapleSprint Mini";
+    d.title = defaultTitle;
     d.head.replaceChildren();
     d.body.replaceChildren();
 
@@ -63,7 +80,7 @@ export class PipOverlay {
     };
 
     const top = makeEl("div", "top");
-    this.els.map = makeEl("span", "", "MapleSprint Mini");
+    this.els.map = makeEl("span", "", defaultTitle);
     this.els.state = makeEl("span", "pill paused", "PAUSED");
     top.append(this.els.map, this.els.state);
 

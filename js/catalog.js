@@ -1,6 +1,26 @@
 // @ts-check
 "use strict";
 
+/** @param {any} mob */
+function extractElements(mob) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (mob?.elements && typeof mob.elements === "object") {
+    for (const [k, v] of Object.entries(mob.elements)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  }
+  // Support WZ elemAttr codes where '3' denotes elemental weakness
+  const wzAttr = String(mob?.elemAttr || mob?.elem_attr || "");
+  if (wzAttr.includes("H3")) out.Holy = "Weak";
+  if (wzAttr.includes("F3")) out.Fire = "Weak";
+  if (wzAttr.includes("I3")) out.Ice = "Weak";
+  if (wzAttr.includes("L3")) out.Lightning = "Weak";
+  if (wzAttr.includes("S3")) out.Poison = "Weak";
+  return out;
+}
+
 /** @param {any} mapsData */
 export function normalizeMaps(mapsData) {
   /** @type {Record<number, { name: string, street: string, isTown?: boolean, spawns: Array<{ id: number, count: number }> }>} */
@@ -34,17 +54,19 @@ export function normalizeMaps(mapsData) {
 
 /** @param {any} mobsData @param {ReturnType<typeof normalizeMaps>} maps */
 export function normalizeMonsters(mobsData, maps) {
-  /** @type {Record<number, { name: string, level?: number, exp?: number, hp?: number, undead?: boolean, elemAttr?: string, boss?: boolean }>} */
+  /** @type {Record<number, { name: string, level?: number, exp?: number, hp?: number, undead: boolean, elements: Record<string, string>, boss: boolean }>} */
   const mobs = {};
-  if (Array.isArray(mobsData?.monsters)) {
-    for (const m of mobsData.monsters) {
+  const list = Array.isArray(mobsData?.monsters) ? mobsData.monsters : null;
+  if (list) {
+    for (const m of list) {
+      const elements = extractElements(m);
       mobs[m.id] = {
         name: m.name,
         level: m.level,
         exp: m.exp,
         hp: m.hp ?? m.max_hp,
         undead: Boolean(m.undead),
-        elemAttr: m.elemAttr || m.elem_attr || "",
+        elements,
         boss: Boolean(m.boss),
       };
       for (const sp of m.maps || []) {
@@ -65,7 +87,7 @@ export function normalizeMonsters(mobsData, maps) {
         exp: m.exp,
         hp: m.max_hp ?? m.hp,
         undead: Boolean(m.undead),
-        elemAttr: m.elem_attr || m.elemAttr || "",
+        elements: extractElements(m),
         boss: Boolean(m.boss),
       };
     }
@@ -92,10 +114,8 @@ export function normalizeItems(itemsData) {
   return items;
 }
 
-const UNDEAD_KEYWORDS = ["zombie", "wraith", "skeleton", "mummy", "chronos", "shade"];
-
 /**
- * Builds pre-aggregated map spawn summaries used by the Best Maps planner.
+ * Builds pre-aggregated map spawn summaries from explicit OSMS catalog fields.
  * @param {ReturnType<typeof normalizeMaps>} maps
  * @param {ReturnType<typeof normalizeMonsters>} mobs
  */
@@ -120,25 +140,20 @@ export function buildGuideIndex(maps, mobs) {
     let hasHolyWeak = false;
     let hasFireWeak = false;
     let hasIceWeak = false;
+    let hasLightningWeak = false;
 
     for (const [mobIdStr, count] of Object.entries(countsByMob)) {
       const mob = mobs[Number(mobIdStr)];
       if (!mob || !mob.level || !mob.exp || mob.boss) continue;
       const hp = Math.max(1, Number(mob.hp) || 1);
-      const elem = String(mob.elemAttr || "");
-      const nameLower = mob.name.toLowerCase();
-      const undead =
-        Boolean(mob.undead) ||
-        elem.includes("H3") ||
-        elem.includes("H2") ||
-        UNDEAD_KEYWORDS.some((kw) => nameLower.includes(kw));
+      const elems = mob.elements || {};
+      const undead = Boolean(mob.undead);
 
-      if (undead) {
-        hasUndead = true;
-        hasHolyWeak = true;
-      }
-      if (elem.includes("F3") || elem.includes("F2")) hasFireWeak = true;
-      if (elem.includes("I3") || elem.includes("I2")) hasIceWeak = true;
+      if (undead) hasUndead = true;
+      if (elems.Holy === "Weak") hasHolyWeak = true;
+      if (elems.Fire === "Weak") hasFireWeak = true;
+      if (elems.Ice === "Weak") hasIceWeak = true;
+      if (elems.Lightning === "Weak") hasLightningWeak = true;
 
       totalSpawns += count;
       weightedLevel += mob.level * count;
@@ -170,6 +185,7 @@ export function buildGuideIndex(maps, mobs) {
       hasHolyWeak,
       hasFireWeak,
       hasIceWeak,
+      hasLightningWeak,
       mobs: mobDetails.slice(0, 4),
     });
   }
@@ -199,6 +215,5 @@ export async function fetchCatalog(baseUrl) {
   const maps = normalizeMaps(mapsRaw);
   const mobs = normalizeMonsters(mobsRaw, maps);
   const items = normalizeItems(itemsRaw);
-  const guideMaps = buildGuideIndex(maps, mobs);
-  return { maps, mobs, items, guideMaps };
+  return { maps, mobs, items, guideMaps: buildGuideIndex(maps, mobs) };
 }
