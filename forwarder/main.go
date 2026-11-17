@@ -33,11 +33,26 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+const (
+	maxPacketBufBytes = 65536
+	wsWriteTimeout    = 2 * time.Second
+	prevLogSuffix     = ".prev"
+)
+
+// TrayMenuConfig holds localizable labels for the Windows taskbar tray context menu.
+type TrayMenuConfig struct {
+	OpenHUD string
+	OpenLog string
+	Quit    string
+	Tooltip string
+}
+
 // RelayConfig holds all configurable operational parameters for the local endpoint relay.
 type RelayConfig struct {
 	AppName     string
 	DisplayName string
 	LogFileName string
+	PrevLogSfx  string
 	IfaceName   string
 	ListenUDP   string
 	HTTPAddr    string
@@ -49,6 +64,7 @@ type RelayConfig struct {
 	SportMin    int
 	SportMax    int
 	Routes      RoutesConfig
+	Menu        TrayMenuConfig
 }
 
 // RoutesConfig parameterizes the HTTP & WebSocket endpoints exposed on the loopback server.
@@ -64,6 +80,7 @@ func DefaultRelayConfig() RelayConfig {
 		AppName:     "MapleSprint",
 		DisplayName: "MapleSprint Relay",
 		LogFileName: "relay.log",
+		PrevLogSfx:  prevLogSuffix,
 		IfaceName:   "wg0",
 		ListenUDP:   "127.0.0.1:51820",
 		HTTPAddr:    "127.0.0.1:8080",
@@ -76,6 +93,12 @@ func DefaultRelayConfig() RelayConfig {
 			Status:     "/status",
 			ClientConf: "/MapleSprint.conf",
 			Root:       "/",
+		},
+		Menu: TrayMenuConfig{
+			OpenHUD: "Open MapleSprint HUD",
+			OpenLog: "Open Relay Log",
+			Quit:    "Quit MapleSprint Relay",
+			Tooltip: "MapleSprint Relay — Click to open HUD",
 		},
 	}
 }
@@ -227,7 +250,7 @@ func (h *RelayHub) Broadcast(c RawChunk) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ws := range h.clients {
-		_ = ws.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 		if err := websocket.JSON.Send(ws, c); err != nil {
 			_ = ws.Close()
 			delete(h.clients, ws)
@@ -303,7 +326,7 @@ func (f *Forwarder) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = f.source.Close()
 	}()
-	buf := make([]byte, 65536)
+	buf := make([]byte, maxPacketBufBytes)
 	for {
 		pkt, hatype, err := f.source.ReadPacket(buf)
 		if err != nil {
@@ -377,7 +400,8 @@ func (s *EndpointServer) handleClientConf(w http.ResponseWriter, _ *http.Request
 	}
 	data, err := os.ReadFile(s.clientConfPath)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		log.Printf("unable to read WireGuard config: %v", err)
+		http.Error(w, "WireGuard config unavailable", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

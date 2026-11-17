@@ -6,35 +6,56 @@ import { escapeHtml, formatCompact, formatDuration } from "./constants.js";
 const MEOWDB_MAP_BASE = "https://meowdb.com/msclassic/maps/";
 const HENESYS_MAP_BASE = "https://henesys.gg/maps/";
 
+export const GUIDE_CONFIG = Object.freeze({
+  minLevelDelta: -12,
+  maxLevelDelta: 15,
+  maxGuideResults: 24,
+  maxSplitsRows: 30,
+  minRecordedMs: 5000,
+  minSplitXphMs: 3000,
+  msPerHour: 3_600_000,
+  idealLevelOffset: 1,
+  idealLevelGrace: 1,
+  maxLevelFitPts: 35,
+  levelFitStepPenalty: 6,
+  maxEfficiencyPts: 35,
+  efficiencyScale: 2.5,
+  maxDensityPts: 30,
+  targetDensitySpawns: 45,
+  clericBonusPts: 15,
+  mageBonusPts: 12,
+  warriorBonusPts: 12,
+  warriorMinSpawns: 15,
+  rangedBonusPts: 10,
+  rangedMinExpPer100Hp: 10,
+  highlightDensitySpawns: 20,
+});
+
 /** @param {Array<any>} splits @param {number} mapId @returns {number} */
 export function recordedRateForMap(splits, mapId) {
   let totalExp = 0;
   let totalMs = 0;
   for (const s of splits) {
-    if (s.map_id === mapId && s.exp_gained > 0 && s.active_ms >= 5000) {
+    if (s.map_id === mapId && s.exp_gained > 0 && s.active_ms >= GUIDE_CONFIG.minRecordedMs) {
       totalExp += s.exp_gained;
       totalMs += s.active_ms;
     }
   }
-  if (totalMs < 5000) return 0;
-  return Math.round((totalExp * 3_600_000) / totalMs);
+  if (totalMs < GUIDE_CONFIG.minRecordedMs) return 0;
+  return Math.round((totalExp * GUIDE_CONFIG.msPerHour) / totalMs);
 }
 
 /**
- * Evaluates a map against transparent, bounded 0-100 suitability criteria:
- * - levelFit   (0..35): peaks when avg mob level is 0..+2 above player
- * - efficiency (0..35): direct EXP yield per 100 mob HP (expPer100Hp)
- * - density    (0..30): direct spawn count scaling up to 45 mobs
- * - classBonus (-15..+15): explicit OSMS elemental/undead or AoE synergy
+ * Evaluates a map against transparent, bounded 0-100 suitability criteria defined in GUIDE_CONFIG.
  */
 export function scoreMap(mapEntry, charLv, jobFilter) {
   const lvDiff = mapEntry.avgLevel - charLv;
-  const distFromIdeal = Math.max(0, Math.abs(lvDiff - 1) - 1);
-  const levelFit = Math.max(0, 35 - distFromIdeal * 6);
+  const distFromIdeal = Math.max(0, Math.abs(lvDiff - GUIDE_CONFIG.idealLevelOffset) - GUIDE_CONFIG.idealLevelGrace);
+  const levelFit = Math.max(0, GUIDE_CONFIG.maxLevelFitPts - distFromIdeal * GUIDE_CONFIG.levelFitStepPenalty);
 
   const expPer100Hp = Number((mapEntry.avgRatio * 100).toFixed(1));
-  const efficiency = Math.min(35, Math.round(expPer100Hp * 2.5));
-  const density = Math.min(30, Math.round((mapEntry.totalSpawns / 45) * 30));
+  const efficiency = Math.min(GUIDE_CONFIG.maxEfficiencyPts, Math.round(expPer100Hp * GUIDE_CONFIG.efficiencyScale));
+  const density = Math.min(GUIDE_CONFIG.maxDensityPts, Math.round((mapEntry.totalSpawns / GUIDE_CONFIG.targetDensitySpawns) * GUIDE_CONFIG.maxDensityPts));
 
   let classBonus = 0;
   /** @type {string[]} */
@@ -42,29 +63,29 @@ export function scoreMap(mapEntry, charLv, jobFilter) {
 
   if (jobFilter === "cleric") {
     if (mapEntry.hasUndead || mapEntry.hasHolyWeak) {
-      classBonus = 15;
+      classBonus = GUIDE_CONFIG.clericBonusPts;
       affinityTags.push("✨ Heal / Holy Weak (+50%)");
     } else {
-      classBonus = -15;
+      classBonus = -GUIDE_CONFIG.clericBonusPts;
     }
   } else if (jobFilter === "magician") {
     if (mapEntry.hasFireWeak || mapEntry.hasIceWeak || mapEntry.hasLightningWeak) {
-      classBonus = 12;
+      classBonus = GUIDE_CONFIG.mageBonusPts;
       affinityTags.push("🔥 Elemental Weak (+50%)");
     }
   } else if (jobFilter === "warrior") {
-    if (mapEntry.totalSpawns >= 15) {
-      classBonus = 12;
+    if (mapEntry.totalSpawns >= GUIDE_CONFIG.warriorMinSpawns) {
+      classBonus = GUIDE_CONFIG.warriorBonusPts;
       affinityTags.push("⚔️ High Spawn AoE");
     }
   } else if (jobFilter === "bowman" || jobFilter === "thief") {
-    if (expPer100Hp >= 10) {
-      classBonus = 10;
+    if (expPer100Hp >= GUIDE_CONFIG.rangedMinExpPer100Hp) {
+      classBonus = GUIDE_CONFIG.rangedBonusPts;
       affinityTags.push("🎯 High EXP / HP");
     }
   } else {
     if (mapEntry.hasUndead) affinityTags.push("Undead / Cleric Friendly");
-    if (mapEntry.totalSpawns >= 20) affinityTags.push("High Spawn Density");
+    if (mapEntry.totalSpawns >= GUIDE_CONFIG.highlightDensitySpawns) affinityTags.push("High Spawn Density");
   }
 
   const score = Math.max(1, Math.min(100, levelFit + efficiency + density + classBonus));
@@ -79,7 +100,7 @@ export function scoreMap(mapEntry, charLv, jobFilter) {
 
 function matchesGuideFilter(m, charLv, query) {
   const lvDiff = m.avgLevel - charLv;
-  if (!query) return lvDiff >= -12 && lvDiff <= 15;
+  if (!query) return lvDiff >= GUIDE_CONFIG.minLevelDelta && lvDiff <= GUIDE_CONFIG.maxLevelDelta;
   const hay = `${m.name} ${m.street} ${m.mobs.map((x) => x.name).join(" ")}`.toLowerCase();
   return hay.includes(query);
 }
@@ -106,9 +127,9 @@ function buildFitPopoverHtml(entry) {
   const p = entry.parts;
   const diffStr = entry.lvDiff > 0 ? `+${entry.lvDiff}` : `${entry.lvDiff}`;
   return `<div class="score-popover">
-    <div class="score-row"><span>EXP / 100 HP (${entry.expPer100Hp})</span><span>+${p.efficiency}/35</span></div>
-    <div class="score-row"><span>Spawns (${entry.totalSpawns} mobs)</span><span>+${p.density}/30</span></div>
-    <div class="score-row"><span>Level Fit (${diffStr} Lv)</span><span>+${p.levelFit}/35</span></div>
+    <div class="score-row"><span>EXP / 100 HP (${entry.expPer100Hp})</span><span>+${p.efficiency}/${GUIDE_CONFIG.maxEfficiencyPts}</span></div>
+    <div class="score-row"><span>Spawns (${entry.totalSpawns} mobs)</span><span>+${p.density}/${GUIDE_CONFIG.maxDensityPts}</span></div>
+    <div class="score-row"><span>Level Fit (${diffStr} Lv)</span><span>+${p.levelFit}/${GUIDE_CONFIG.maxLevelFitPts}</span></div>
     <div class="score-row"><span>Class Synergy</span><span>${p.classBonus >= 0 ? "+" : ""}${p.classBonus}</span></div>
     <div class="score-row total"><span>Fit Rating</span><span>${entry.score}/100</span></div>
   </div>`;
@@ -171,7 +192,7 @@ export function renderGuideHtml({ loaded, guideMaps, mapSplits, charLv, jobFilte
   }
   sortGuideEntries(ranked, sortBy);
 
-  const top = ranked.slice(0, 24);
+  const top = ranked.slice(0, GUIDE_CONFIG.maxGuideResults);
   if (top.length === 0) {
     return `<div class="guide-card"><div class="guide-map-region">No matching maps found for Lv. ${charLv}. Try clearing the search filter.</div></div>`;
   }
@@ -190,12 +211,15 @@ export function renderSplitsHtml(mapSplits, mapsDb) {
   }
 
   return rows
-    .slice(0, 30)
+    .slice(0, GUIDE_CONFIG.maxSplitsRows)
     .map((s) => {
       const m = mapsDb[s.map_id];
       const mapName = m ? m.name : `Map #${s.map_id}`;
       const label = m ? (m.street ? `${m.name} (${m.street})` : m.name) : `Map #${s.map_id}`;
-      const xph = s.active_ms >= 3000 ? Math.round((s.exp_gained * 3_600_000) / s.active_ms) : 0;
+      const xph =
+        s.active_ms >= GUIDE_CONFIG.minSplitXphMs
+          ? Math.round((s.exp_gained * GUIDE_CONFIG.msPerHour) / s.active_ms)
+          : 0;
       const safeLabel = escapeHtml(label);
       const chHtml = s.channel != null ? ` <span class="muted">(Ch. ${s.channel})</span>` : "";
 

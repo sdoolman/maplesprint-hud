@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261117b" />
+  <link rel="stylesheet" href="style.css?v=20261117c" />
 </head>
 <body>
   <main class="wrap">
@@ -193,8 +193,8 @@
                 <span class="label">1. WIREGUARD TUNNEL</span>
                 <a class="hs-link" href="https://www.wireguard.com/install/" target="_blank" rel="noopener noreferrer" title="Download official WireGuard client">Install WG ↗</a>
               </div>
-              <strong id="wgTunnelStatus" class="bridge-val">Waiting (:51820)</strong>
-              <span class="sub">158.115.192.0/19 → Local</span>
+              <strong id="wgTunnelStatus" class="bridge-val">Waiting…</strong>
+              <span class="sub">Split-Tunnel → Local Relay</span>
             </div>
             <div class="bridge-node">
               <div class="label-row">
@@ -211,7 +211,7 @@
             </div>
           </div>
           <div class="row-worker">
-            <input id="workerUrl" type="url" placeholder="Local Endpoint URL (default: http://127.0.0.1:8080)" />
+            <input id="endpointUrl" type="url" placeholder="Local Endpoint URL (default: http://127.0.0.1:8080)" />
           </div>
           <div class="actions">
             <button id="connectBtn" type="button" disabled title="Waiting for local endpoint relay at 127.0.0.1:8080">Endpoint Offline</button>
@@ -232,6 +232,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261117b"></script>
+  <script type="module" src="js/main.js?v=20261117c"></script>
 </body>
 </html>

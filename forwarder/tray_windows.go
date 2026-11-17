@@ -193,7 +193,7 @@ func setupLogging(cfg RelayConfig) (logPath string, logDir string, closeFn func(
 		return "", "", func() {}
 	}
 	logPath = filepath.Join(logDir, cfg.LogFileName)
-	prevPath := logPath + ".prev"
+	prevPath := logPath + cfg.PrevLogSfx
 	if info, statErr := os.Stat(logPath); statErr == nil && info.Size() > 0 {
 		_ = os.Rename(logPath, prevPath)
 	}
@@ -250,13 +250,13 @@ func showTrayMenu(hwnd uintptr, cfg RelayConfig, hasLog bool) {
 	}
 	defer procDestroyMenu.Call(hMenu)
 
-	items := []menuItem{{cmdOpenHUD, mfString, "Open " + cfg.DisplayName + " HUD"}}
+	items := []menuItem{{cmdOpenHUD, mfString, cfg.Menu.OpenHUD}}
 	if hasLog {
-		items = append(items, menuItem{cmdOpenLog, mfString, "Open Relay Log"})
+		items = append(items, menuItem{cmdOpenLog, mfString, cfg.Menu.OpenLog})
 	}
 	items = append(items,
 		menuItem{0, mfSeparator, ""},
-		menuItem{cmdQuit, mfString, "Quit " + cfg.DisplayName},
+		menuItem{cmdQuit, mfString, cfg.Menu.Quit},
 	)
 
 	for _, it := range items {
@@ -348,7 +348,7 @@ func runTray(ctx context.Context, cancel context.CancelFunc, cfg RelayConfig, lo
 	nid.uFlags = nifMessage | nifIcon | nifTip
 	nid.uCallbackMessage = wmTrayIcon
 	nid.hIcon = hIcon
-	tip, _ := syscall.UTF16FromString(cfg.DisplayName + " — Click to open HUD")
+	tip, _ := syscall.UTF16FromString(cfg.Menu.Tooltip)
 	copy(nid.szTip[:], tip)
 
 	if ok, _, err := procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid))); ok == 0 {

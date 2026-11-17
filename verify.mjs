@@ -129,6 +129,7 @@ test("OSMS elements schema, transparent 0-100 suitability rating, escaping, and 
   assert.ok(guideHtml.includes("https://meowdb.com/msclassic/maps/010004140"));
   assert.ok(guideHtml.includes("https://henesys.gg/maps/10004140"));
   assert.match(guideHtml, /Fit \d+\/100/);
+  assert.ok(!html.includes('id="workerUrl"'), "Legacy workerUrl ID must not appear in index.html");
 
   const splitsHtml = renderSplitsHtml(
     [{ map_id: 10004140, channel: 2, active_ms: 60_000, exp_gained: 5000, kills: 120, mesos_gained: 1500, drops: 3 }],
