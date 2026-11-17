@@ -102,7 +102,7 @@ export async function fetchWireGuardConf(rawBaseUrl, fallbackWgPort = ENDPOINT_C
     "[Peer]",
     `PublicKey = ${peerPub}`,
     `Endpoint = 127.0.0.1:${port}`,
-    "AllowedIPs = 158.115.192.0/19",
+    "AllowedIPs = 158.115.192.0/19, 35.160.0.0/13, 166.117.0.0/16",
     "PersistentKeepalive = 25",
     "",
   ].join("\n");
