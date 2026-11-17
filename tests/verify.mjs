@@ -300,11 +300,12 @@ test("guide scoring, filtering, sorting, recordedRateForMap, and empty states wo
   assert.match(shortSplitHtml, /0\/h/);
 });
 
-test("mob_kill handler does not mutate kills, lastMobId, or active timer directly", () => {
+test("mob_kill and map-wide mob_damage do not pollute kills, lastMobId, feed, or active timer", () => {
   const mobKillMatch = mainJs.match(/mob_kill\([^)]*\)\s*\{([\s\S]*?)\n  \},/);
   assert.ok(mobKillMatch, "Expected mob_kill handler in web/js/main.js");
   const body = mobKillMatch[1];
   assert.ok(!body.includes("recordActiveTime"), "mob_kill must not call recordActiveTime for other players' kills");
   assert.ok(!body.includes("state.lastMobId"), "mob_kill must not update state.lastMobId before exp_gain");
   assert.ok(!body.includes("state.kills"), "mob_kill must not increment state.kills directly");
+  assert.ok(!mainJs.includes("mob_damage("), "map-wide mob_damage must not be handled in Live Events feed");
 });

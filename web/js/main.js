@@ -107,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117h", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117i", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -625,14 +625,6 @@ const EVENT_HANDLERS = {
     saveSplits();
     addFeed(`+${ev.amount.toLocaleString()} mesos`);
   },
-  mob_damage(ev, evTs) {
-    recordActiveTime(evTs);
-    if (ev.damage > 0) {
-      state.damageDealt += ev.damage;
-      const mob = ev.mob_id !== null ? db.mobs[ev.mob_id] : null;
-      addFeed(`Hit ${mob ? mob.name : "mob"} for ${ev.damage}`);
-    }
-  },
   attack_hit(ev, evTs) {
     recordActiveTime(evTs);
     if (ev.damage > 0) state.damageDealt += ev.damage;
@@ -642,7 +634,7 @@ const EVENT_HANDLERS = {
 function handleEvent(ev) {
   const fn = EVENT_HANDLERS[ev?.type];
   if (!fn) return;
-  state.events++;
+  if (ev.type !== "mob_kill") state.events++;
   fn(ev, ev.ts || Date.now());
 }
 
