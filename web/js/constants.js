@@ -39,6 +39,52 @@ export const JOB_NAMES = Object.freeze({
   420: "Bandit", 421: "Chief Bandit", 422: "Shadower",
 });
 
+/**
+ * Minimum Classic World character level required for a given Explorer job ID.
+ * @param {number} jobId
+ * @returns {number}
+ */
+export function minLevelForJob(jobId) {
+  const id = Number(jobId) || 0;
+  if (id <= 0) return 1;
+  const adv = id % 10;
+  if (adv >= 2) return 120;
+  if (adv === 1) return 70;
+  if (id % 100 !== 0) return 30;
+  return id === 200 ? 8 : 10;
+}
+
+/**
+ * Job `[id, name]` entries eligible for selection at the specified character level.
+ * @param {number} level
+ * @returns {Array<[string, string]>}
+ */
+export function eligibleJobsForLevel(level) {
+  const lv = Math.max(1, Number(level) || 1);
+  return Object.entries(JOB_NAMES).filter(([id]) => minLevelForJob(Number(id)) <= lv);
+}
+
+/**
+ * Steps a known job ID down its class branch if level is below its requirement.
+ * @param {number} jobId
+ * @param {number} level
+ * @returns {number}
+ */
+export function normalizeJobForLevel(jobId, level) {
+  const id = Number(jobId) || 0;
+  const lv = Math.max(1, Number(level) || 1);
+  if (!(id in JOB_NAMES) || minLevelForJob(id) <= lv) return id;
+  for (const cand of [
+    Math.floor(id / 10) * 10 + 1,
+    Math.floor(id / 10) * 10,
+    Math.floor(id / 100) * 100,
+    0,
+  ]) {
+    if (cand in JOB_NAMES && minLevelForJob(cand) <= lv) return cand;
+  }
+  return 0;
+}
+
 /** @param {string} id @returns {HTMLElement} */
 export function requireEl(id) {
   const el = document.getElementById(id);

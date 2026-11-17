@@ -9,8 +9,10 @@ import {
   MAX_CLASSIC_LEVEL,
   ROLLING_WINDOW_MS,
   base64ToBytes,
+  eligibleJobsForLevel,
   formatCompact,
   formatDuration,
+  normalizeJobForLevel,
   requireEl,
 } from "./constants.js";
 import { fetchCatalog } from "./catalog.js";
@@ -134,6 +136,7 @@ const db = {
 };
 
 function createSessionState(savedLevel, savedJob, savedSplits) {
+  const level = Math.min(MAX_CLASSIC_LEVEL, Math.max(1, Number(savedLevel) || 1));
   return {
     startTs: /** @type {number | null} */ (null),
     activeMs: 0,
@@ -141,8 +144,8 @@ function createSessionState(savedLevel, savedJob, savedSplits) {
     sessionExp: 0,
     lastExp: 0,
     totalExp: 0,
-    level: Math.min(MAX_CLASSIC_LEVEL, Math.max(1, Number(savedLevel) || 1)),
-    job: Number(savedJob) || 0,
+    level,
+    job: normalizeJobForLevel(Number(savedJob) || 0, level),
     kills: 0,
     lastMobId: /** @type {number | null} */ (null),
     mesos: 0,
@@ -182,9 +185,9 @@ function guideFilterForJob(jobId) {
   return "all";
 }
 
-function populateJobSelect() {
+function populateJobSelect(level = state.level) {
   charJobEl.replaceChildren();
-  for (const [id, name] of Object.entries(JOB_NAMES)) {
+  for (const [id, name] of eligibleJobsForLevel(level)) {
     const opt = document.createElement("option");
     opt.value = id;
     opt.textContent = name;
@@ -195,29 +198,34 @@ function populateJobSelect() {
 function setJobSelectValue(jobId) {
   const val = String(Number(jobId) || 0);
   if (![...charJobEl.options].some((o) => o.value === val)) {
+    if (Number(val) in JOB_NAMES) return;
     const opt = document.createElement("option");
     opt.value = val;
-    opt.textContent = JOB_NAMES[Number(val)] || `Job #${val}`;
+    opt.textContent = `Job #${val}`;
     charJobEl.append(opt);
   }
   charJobEl.value = val;
 }
 
 function setCharacterProgression(level, job) {
-  if (level >= 1 && level <= MAX_CLASSIC_LEVEL) {
+  const prevLevel = state.level;
+  if (level != null && level >= 1 && level <= MAX_CLASSIC_LEVEL) {
     state.level = level;
     manualLevelInput.value = String(level);
     guideLevelInput.value = String(level);
     localStorage.setItem(STORAGE_KEYS.level, String(level));
   }
-  if (job != null) {
-    state.job = Number(job);
-    setJobSelectValue(state.job);
+  const rawJob = job != null ? Number(job) : state.job;
+  const validJob = normalizeJobForLevel(rawJob, state.level);
+  if (state.level !== prevLevel) populateJobSelect(state.level);
+  if (job != null || validJob !== state.job) {
+    state.job = validJob;
     localStorage.setItem(STORAGE_KEYS.job, String(state.job));
   }
+  setJobSelectValue(state.job);
 }
 
-populateJobSelect();
+populateJobSelect(state.level);
 setJobSelectValue(state.job);
 manualLevelInput.value = String(state.level);
 guideLevelInput.value = String(state.level > 1 ? state.level : HUD_CONFIG.defaultGuideLevel);
@@ -792,6 +800,14 @@ manualLevelInput.addEventListener("change", () => {
   const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
   setCharacterProgression(lv, null);
   render();
+});
+
+charJobEl.addEventListener("mousedown", () => {
+  const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
+  if (lv !== state.level) {
+    setCharacterProgression(lv, null);
+    render();
+  }
 });
 
 charJobEl.addEventListener("change", () => {

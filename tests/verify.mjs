@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } from "../web/js/catalog.js";
-import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, base64ToBytes, escapeHtml, formatCompact, formatDuration } from "../web/js/constants.js";
+import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, base64ToBytes, eligibleJobsForLevel, escapeHtml, formatCompact, formatDuration, minLevelForJob, normalizeJobForLevel } from "../web/js/constants.js";
 import { fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "../web/js/endpoint.js";
 import { recordedRateForMap, renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
 
@@ -312,4 +312,30 @@ test("mob_kill and map-wide mob_damage do not pollute kills, lastMobId, feed, or
   assert.match(html, /<select id="charJob"/, "charJob must be an editable select element");
   assert.match(mainJs, /Live stream active/, "mapLine must update when raw chunks are flowing prior to SetField");
   assert.match(mainJs, /ev\.mob_id/, "exp_gain must consume decoder-attributed mob_id directly");
+  assert.match(mainJs, /eligibleJobsForLevel/, "job dropdown must filter options by character level");
+});
+
+test("job selector enforces Classic World advancement level gates (1st Lv8/10, 2nd Lv30, 3rd Lv70, 4th Lv120)", () => {
+  assert.equal(minLevelForJob(0), 1);
+  assert.equal(minLevelForJob(200), 8);
+  assert.equal(minLevelForJob(100), 10);
+  assert.equal(minLevelForJob(110), 30);
+  assert.equal(minLevelForJob(111), 70);
+  assert.equal(minLevelForJob(112), 120);
+
+  const idsAt = (lv) => eligibleJobsForLevel(lv).map(([id]) => Number(id));
+  assert.deepEqual(idsAt(7), [0]);
+  assert.deepEqual(idsAt(8), [0, 200]);
+  assert.deepEqual(idsAt(29), [0, 100, 200, 300, 400]);
+  assert.ok(idsAt(30).includes(110) && !idsAt(30).includes(111));
+  assert.ok(idsAt(69).includes(230) && !idsAt(69).includes(231));
+  assert.ok(idsAt(70).includes(231) && !idsAt(70).includes(232));
+  assert.ok(!idsAt(100).some((id) => id % 10 === 2));
+  assert.ok(idsAt(120).includes(112) && idsAt(120).includes(422));
+
+  assert.equal(normalizeJobForLevel(112, 100), 111);
+  assert.equal(normalizeJobForLevel(111, 50), 110);
+  assert.equal(normalizeJobForLevel(111, 29), 100);
+  assert.equal(normalizeJobForLevel(230, 8), 200);
+  assert.equal(normalizeJobForLevel(100, 9), 0);
 });
