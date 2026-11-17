@@ -186,4 +186,34 @@ func TestEndpointServerRoutesAndPNA(t *testing.T) {
 	if !strings.Contains(recRoot.Header().Get("Location"), "endpoint=http%3A%2F%2F127.0.0.1%3A8080") {
 		t.Fatalf("unexpected redirect target: %s", recRoot.Header().Get("Location"))
 	}
+
+	reqConf := httptest.NewRequest(http.MethodGet, cfg.Routes.Conf, nil)
+	recConf := httptest.NewRecorder()
+	h.ServeHTTP(recConf, reqConf)
+	if recConf.Code != http.StatusOK {
+		t.Fatalf("expected 200 for %s, got %d", cfg.Routes.Conf, recConf.Code)
+	}
+	if body := recConf.Body.String(); !strings.Contains(body, "Endpoint = 127.0.0.1:51821") || !strings.Contains(body, "AllowedIPs = ") {
+		t.Fatalf("unexpected MapleSprint.conf body: %s", body)
+	}
+}
+
+func TestParseTCPPayloadRejectsMalformedAndNonTCP(t *testing.T) {
+	if _, ok := parseTCPPayload([]byte{0x45, 0x00}, arphrdNone); ok {
+		t.Fatal("expected truncated IPv4 packet to be rejected")
+	}
+
+	// Valid length IPv4 header with UDP protocol (17) instead of TCP (6)
+	udpPkt := buildIPv4TCPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 2}, 443, 51000, 1, []byte("udp"))
+	udpPkt[ipv4OffProto] = 17
+	if _, ok := parseTCPPayload(udpPkt, arphrdNone); ok {
+		t.Fatal("expected non-TCP packet to be rejected")
+	}
+
+	// Non-IPv4 ethertype (ARP 0x0806)
+	eth := make([]byte, etherHeaderLen+len(udpPkt))
+	binary.BigEndian.PutUint16(eth[etherOffType:etherHeaderLen], 0x0806)
+	if _, ok := parseTCPPayload(eth, arphrdEther); ok {
+		t.Fatal("expected non-IPv4 Ethernet frame to be rejected")
+	}
 }

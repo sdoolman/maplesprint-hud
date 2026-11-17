@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } from "../web/js/catalog.js";
-import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, escapeHtml, formatCompact, formatDuration } from "../web/js/constants.js";
-import { sanitizeEndpointUrl } from "../web/js/endpoint.js";
-import { renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
+import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, base64ToBytes, escapeHtml, formatCompact, formatDuration } from "../web/js/constants.js";
+import { fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "../web/js/endpoint.js";
+import { recordedRateForMap, renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
 const webDir = path.join(rootDir, "web");
@@ -172,4 +172,128 @@ test("public repo contains zero codec files, static ICO resource exists, safe UR
   assert.match(trayWinGo, /validateLogPath/);
   assert.ok(!trayWinGo.includes("createMapleIcon"), "In-memory icon pixel drawing must not exist");
   assert.ok(!mainGo.includes("<!DOCTYPE html>"), "relay/main.go must not embed its own HTML UI");
+});
+
+test("constants formatCompact, formatDuration, and base64ToBytes handle edge cases", () => {
+  assert.equal(formatCompact(0), "0");
+  assert.equal(formatCompact(9_999), "9,999");
+  assert.equal(formatCompact(12_340), "12.3k");
+  assert.equal(formatCompact(2_500_000), "2.50M");
+
+  assert.equal(formatDuration(-5000), "00:00:00");
+  assert.equal(formatDuration(45_000), "00:00:45");
+  assert.equal(formatDuration(125_000), "00:02:05");
+  assert.equal(formatDuration(3661_000), "01:01:01");
+
+  assert.deepEqual(Array.from(base64ToBytes("SGVsbG8=")), [72, 101, 108, 108, 111]);
+  assert.deepEqual(Array.from(base64ToBytes("!!!not-base64!!!")), []);
+});
+
+test("probeEndpoint and fetchWireGuardConf handle valid, error, and offline relay states", async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true, wg_port: 51825 }), { status: 200 });
+    };
+
+    const invalid = await probeEndpoint("ftp://127.0.0.1:8080");
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.invalid, true);
+    assert.equal(fetchCalls, 0);
+
+    const okProbe = await probeEndpoint("http://127.0.0.1:8080/");
+    assert.equal(okProbe.ok, true);
+    assert.equal(okProbe.status?.wg_port, 51825);
+
+    globalThis.fetch = async () => new Response("nope", { status: 503 });
+    const httpErr = await probeEndpoint("http://127.0.0.1:8080");
+    assert.equal(httpErr.ok, false);
+    assert.equal(httpErr.invalid, false);
+    assert.equal(httpErr.error, "HTTP 503");
+
+    globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const netErr = await probeEndpoint("http://127.0.0.1:8080");
+    assert.equal(netErr.ok, false);
+    assert.equal(netErr.error, "ECONNREFUSED");
+
+    const fallbackConf = await fetchWireGuardConf("http://127.0.0.1:8080", 51899);
+    assert.match(fallbackConf, /Endpoint = 127\.0\.0\.1:51899/);
+    const defaultPortConf = await fetchWireGuardConf("invalid", -1);
+    assert.match(defaultPortConf, /Endpoint = 127\.0\.0\.1:51820/);
+
+    globalThis.fetch = async () => new Response("[Interface]\nAddress = 10.66.66.2/32\n", { status: 200 });
+    const liveConf = await fetchWireGuardConf("http://127.0.0.1:8080");
+    assert.match(liveConf, /Address = 10\.66\.66\.2\/32/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("guide scoring, filtering, sorting, recordedRateForMap, and empty states work accurately", () => {
+  const highSpawnEntry = {
+    id: 100040000,
+    name: "Wild Boar Land",
+    region: "Victoria",
+    street: "Perion",
+    isTown: false,
+    avgLevel: 25,
+    avgExp: 42,
+    avgRatio: 0.12,
+    totalSpawns: 30,
+    hasUndead: false,
+    hasFireWeak: false,
+    hasIceWeak: true,
+    hasLightningWeak: false,
+    hasHolyWeak: false,
+    mobs: [{ name: "Wild Boar", level: 25, exp: 42, hp: 350, count: 30 }],
+  };
+  const lowSpawnEntry = {
+    ...highSpawnEntry,
+    id: 100040001,
+    name: "Quiet Field",
+    avgExp: 60,
+    totalSpawns: 8,
+    hasIceWeak: false,
+    mobs: [{ name: "Jr. Boogie", level: 26, exp: 60, hp: 600, count: 8 }],
+  };
+
+  assert.ok(scoreMap(highSpawnEntry, 24, "warrior").affinityTags.some((t) => t.includes("High Spawn AoE")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "magician").affinityTags.some((t) => t.includes("Elemental Weak")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "bowman").affinityTags.some((t) => t.includes("High EXP / HP")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "thief").affinityTags.some((t) => t.includes("High EXP / HP")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "cleric").score < scoreMap(highSpawnEntry, 24, "all").score);
+
+  const splits = [
+    { map_id: 100040000, active_ms: 2000, exp_gained: 9999 }, // below minRecordedMs (5000)
+    { map_id: 100040000, active_ms: 30_000, exp_gained: 1500 },
+    { map_id: 100040000, active_ms: 30_000, exp_gained: 4500 },
+  ];
+  assert.equal(recordedRateForMap(splits, 100040000), 360_000);
+  assert.equal(recordedRateForMap(splits, 999999), 0);
+
+  assert.match(renderGuideHtml({ loaded: false, guideMaps: [], mapSplits: [], charLv: 24, jobFilter: "all", sortBy: "score", query: "" }), /Loading OSMS map &amp; monster catalog/);
+  assert.match(renderGuideHtml({ loaded: true, guideMaps: [highSpawnEntry], mapSplits: [], charLv: 24, jobFilter: "all", sortBy: "score", query: "no-such-map" }), /No matching maps found/);
+
+  const sortedByMobExp = renderGuideHtml({
+    loaded: true,
+    guideMaps: [highSpawnEntry, lowSpawnEntry],
+    mapSplits: splits,
+    charLv: 24,
+    jobFilter: "all",
+    sortBy: "exp",
+    query: "",
+  });
+  assert.ok(sortedByMobExp.indexOf("Quiet Field") < sortedByMobExp.indexOf("Wild Boar Land"));
+
+  assert.match(renderSplitsHtml([], new Map()), /No map splits recorded yet/);
+  const shortSplitHtml = renderSplitsHtml(
+    [{ map_id: 999999, channel: 1, active_ms: 1500, exp_gained: 100, kills: 2, mesos_gained: 0, drops: 0 }],
+    new Map()
+  );
+  assert.match(shortSplitHtml, /Map #999999/);
+  assert.match(shortSplitHtml, /0\/h/);
 });
