@@ -36,8 +36,10 @@ const (
 	tcpOutboundDialGrace = 8 * time.Second
 	wgServerAddrStr      = "10.66.66.1"
 	wgClientCIDR         = "10.66.66.2/32"
-	wgGameAllowedIPs     = "158.115.192.0/19, 35.160.0.0/13, 166.117.0.0/16"
 )
+
+// wgGameAllowedIPs can be overridden at build time via -ldflags "-X 'main.wgGameAllowedIPs=...'".
+var wgGameAllowedIPs = "158.115.192.0/19, 35.160.0.0/13, 166.117.0.0/16"
 
 // StackTUN implements wireguard/tun.Device backed by a userspace gVisor IPv4/TCP stack.
 // Outbound packets (server -> client) are optionally tapped so game chunks can be mirrored to the HUD.
