@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.zx2c4.com/wireguard/conn"
 )
 
 func buildIPv4TCPPacket(srcIP, dstIP [ipv4AddrLen]byte, sport, dport uint16, seq uint32, payload []byte) []byte {
@@ -377,5 +379,81 @@ func TestStackTUNAndBidirectionalRelay(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("relayBidirectional did not exit after peer close")
+	}
+}
+
+func TestLoopbackBindAndHandshakeParsing(t *testing.T) {
+	if _, err := NewLoopbackBind(netip.MustParseAddr("192.168.1.1")); err == nil {
+		t.Fatal("expected non-loopback IP to be rejected")
+	}
+	bind, err := NewLoopbackBind(netip.MustParseAddr("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("NewLoopbackBind failed: %v", err)
+	}
+	fns, port, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("bind.Open failed: %v", err)
+	}
+	defer bind.Close()
+	if port == 0 || len(fns) != 1 {
+		t.Fatalf("unexpected Open result: port=%d fns=%d", port, len(fns))
+	}
+	localUDP := bind.pc.LocalAddr().(*net.UDPAddr)
+	if !localUDP.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("expected socket bound strictly to 127.0.0.1, got %s", localUDP.IP)
+	}
+
+	// Verify Send + ReceiveFunc roundtrip on loopback.
+	peerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerConn.Close()
+	ep, err := bind.ParseEndpoint(peerConn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("ParseEndpoint failed: %v", err)
+	}
+	if err := bind.Send([][]byte{[]byte("wg-ping")}, ep); err != nil {
+		t.Fatalf("bind.Send failed: %v", err)
+	}
+	buf := make([]byte, 64)
+	_ = peerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := peerConn.ReadFromUDP(buf)
+	if err != nil || string(buf[:n]) != "wg-ping" {
+		t.Fatalf("expected wg-ping on peer, got %q err=%v", buf[:n], err)
+	}
+
+	if _, err := peerConn.WriteToUDP([]byte("wg-pong"), localUDP); err != nil {
+		t.Fatal(err)
+	}
+	recvBufs := [][]byte{make([]byte, 64)}
+	sizes := make([]int, 1)
+	eps := make([]conn.Endpoint, 1)
+	count, err := fns[0](recvBufs, sizes, eps)
+	if err != nil || count != 1 || string(recvBufs[0][:sizes[0]]) != "wg-pong" {
+		t.Fatalf("expected wg-pong from ReceiveFunc, got count=%d data=%q err=%v", count, recvBufs[0][:sizes[0]], err)
+	}
+
+	// Verify IPC handshake parser & /status wg_handshake field.
+	if parseIpcHandshake("last_handshake_time_sec=0\nrx_bytes=0\n") {
+		t.Fatal("expected zero handshake timestamp to return false")
+	}
+	if !parseIpcHandshake("public_key=abc\nlast_handshake_time_sec=1700000123\n") {
+		t.Fatal("expected non-zero handshake timestamp to return true")
+	}
+
+	cfg := DefaultRelayConfig()
+	srv := &EndpointServer{
+		mode:       "wireguard-netstack",
+		wgPort:     51820,
+		routes:     cfg.Routes,
+		hub:        NewRelayHub(),
+		wgStatusFn: func() bool { return true },
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cfg.Routes.Status, nil))
+	var st EndpointStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || !st.WGHandshake {
+		t.Fatalf("expected wg_handshake=true in /status, got %s (err=%v)", rec.Body.String(), err)
 	}
 }

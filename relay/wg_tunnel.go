@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -302,8 +304,22 @@ func StartWGRelayEndpoint(ctx context.Context, cfg RelayConfig, outboundIP strin
 	dialer := NewPhysicalNICDialer(outboundIP, tcpOutboundDialGrace)
 	attachTCPForwarder(ctx, stackTUN.Stack(), dialer, wgSubnet)
 
+	listenAP, err := netip.ParseAddrPort(cfg.ListenUDP)
+	if err != nil {
+		return nil, fmt.Errorf("invalid WireGuard listen address %q: %w", cfg.ListenUDP, err)
+	}
+	var wgBind conn.Bind
+	if listenAP.Addr().IsLoopback() {
+		wgBind, err = NewLoopbackBind(listenAP.Addr())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		wgBind = conn.NewDefaultBind()
+	}
+
 	wgLogger := device.NewLogger(device.LogLevelError, "[wg] ")
-	dev := device.NewDevice(stackTUN, conn.NewDefaultBind(), wgLogger)
+	dev := device.NewDevice(stackTUN, wgBind, wgLogger)
 	uapiConf := BuildUAPIConfig(serverKeys.PrivateHex(), clientKeys.PublicHex(), wgPort, wgClientCIDR)
 	if err := dev.IpcSet(uapiConf); err != nil {
 		dev.Close()
@@ -335,6 +351,30 @@ func StartWGRelayEndpoint(ctx context.Context, cfg RelayConfig, outboundIP strin
 
 func (w *WGRelayEndpoint) ClientConf() string {
 	return w.clientConf
+}
+
+// parseIpcHandshake checks WireGuard UAPI IpcGet output for any peer with a non-zero handshake timestamp.
+func parseIpcHandshake(ipcOut string) bool {
+	for _, line := range strings.Split(ipcOut, "\n") {
+		if val, ok := strings.CutPrefix(strings.TrimSpace(line), "last_handshake_time_sec="); ok {
+			if sec, err := strconv.ParseInt(val, 10, 64); err == nil && sec > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasHandshake returns true once the WireGuard client has completed a cryptographic handshake.
+func (w *WGRelayEndpoint) HasHandshake() bool {
+	if w == nil || w.dev == nil {
+		return false
+	}
+	out, err := w.dev.IpcGet()
+	if err != nil {
+		return false
+	}
+	return parseIpcHandshake(out)
 }
 
 func (w *WGRelayEndpoint) Close() {

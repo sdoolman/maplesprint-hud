@@ -107,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117e", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117f", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -257,7 +257,13 @@ function applyEndpointProbeUI(result) {
     if (typeof st.wg_port === "number" && st.wg_port > 0) {
       state.observedWgPort = st.wg_port;
       if (!state.rawChunksReceived && !(st.packets_relayed > 0)) {
-        wgTunnelStatus.textContent = `Waiting (:${st.wg_port})`;
+        if (st.wg_handshake) {
+          wgTunnelStatus.textContent = "Tunnel Ready (Launch game)";
+          wgTunnelStatus.classList.add("online");
+        } else {
+          wgTunnelStatus.textContent = `Waiting (:${st.wg_port})`;
+          wgTunnelStatus.classList.remove("online");
+        }
       }
     }
     if (st.outbound_ip) outboundIpTag.textContent = `Outbound NIC: ${st.outbound_ip} (No-Loop)`;

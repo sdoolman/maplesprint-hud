@@ -116,6 +116,7 @@ type EndpointStatus struct {
 	LastPacketTs   int64  `json:"last_packet_ts"`
 	ConnectedHUDs  int    `json:"connected_huds"`
 	ConfAvailable  bool   `json:"conf_available"`
+	WGHandshake    bool   `json:"wg_handshake"`
 }
 
 // PacketSource abstracts packet capture from a WireGuard interface or local UDP socket.
@@ -356,6 +357,7 @@ type EndpointServer struct {
 	sportMax       int
 	routes         RoutesConfig
 	hub            *RelayHub
+	wgStatusFn     func() bool
 }
 
 func (s *EndpointServer) Handler() http.Handler {
@@ -391,6 +393,7 @@ func (s *EndpointServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		LastPacketTs:   s.hub.lastPacketTs.Load(),
 		ConnectedHUDs:  s.hub.ClientCount(),
 		ConfAvailable:  confOK,
+		WGHandshake:    s.wgStatusFn != nil && s.wgStatusFn(),
 	})
 }
 
@@ -481,6 +484,7 @@ func main() {
 		target         string
 		wgPort         int
 		clientConfBody string
+		wgStatusFn     func() bool
 	)
 
 	if cfg.ListenUDP != "" {
@@ -493,6 +497,7 @@ func main() {
 		target = cfg.ListenUDP
 		wgPort = wgEndpoint.wgPort
 		clientConfBody = wgEndpoint.ClientConf()
+		wgStatusFn = wgEndpoint.HasHandshake
 	} else {
 		source, err := OpenRawSocketSource(cfg.IfaceName, ethPAll)
 		if err != nil {
@@ -524,6 +529,7 @@ func main() {
 		sportMax:       sportMax,
 		routes:         cfg.Routes,
 		hub:            hub,
+		wgStatusFn:     wgStatusFn,
 	})
 
 	if !cfg.NoBrowser {
