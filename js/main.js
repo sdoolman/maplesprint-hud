@@ -43,7 +43,6 @@ const endpointInput = /** @type {HTMLInputElement} */ (requireEl("endpointUrl"))
 const connectBtn = /** @type {HTMLButtonElement} */ (requireEl("connectBtn"));
 const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
 const downloadWgConfBtn = /** @type {HTMLButtonElement} */ (requireEl("downloadWgConfBtn"));
-const wasmStatusBadge = requireEl("wasmStatusBadge");
 const wgTunnelStatus = requireEl("wgTunnelStatus");
 const endpointStatusBadge = requireEl("endpointStatusBadge");
 const outboundIpTag = requireEl("outboundIpTag");
@@ -108,7 +107,7 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117c", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../pip.css?v=20261117d", import.meta.url).href);
 
 function loadSavedSplits() {
   try {
@@ -213,7 +212,6 @@ async function initCodec() {
       if (typeof mod.MapleDecoder !== "function") continue;
       codecEngine.decoder = new mod.MapleDecoder();
       codecEngine.ready = true;
-      wasmStatusBadge.textContent = "CODEC: Ready";
       wasmNodeDetail.textContent = "Ready";
       wasmNodeDetail.classList.add("online");
       return;
@@ -222,7 +220,6 @@ async function initCodec() {
     }
   }
 
-  wasmStatusBadge.textContent = "CODEC: Standby";
   wasmNodeDetail.textContent = "Standby";
 }
 

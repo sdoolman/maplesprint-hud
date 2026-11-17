@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="style.css?v=20261117c" />
+  <link rel="stylesheet" href="style.css?v=20261117d" />
 </head>
 <body>
   <main class="wrap">
@@ -183,10 +183,7 @@
     <div id="viewSetup" class="tab-view hidden">
       <section id="configCard" class="card config">
         <div class="config-group">
-          <div class="label-row">
-            <div class="label">WIREGUARD + LOCAL ENDPOINT BRIDGE</div>
-            <span id="wasmStatusBadge" class="mini-tag">CODEC: Loading...</span>
-          </div>
+          <div class="label">WIREGUARD + LOCAL ENDPOINT BRIDGE</div>
           <div class="bridge-grid">
             <div class="bridge-node">
               <div class="label-row">
@@ -205,7 +202,10 @@
               <span id="outboundIpTag" class="sub">Outbound NIC: Auto (No-Loop)</span>
             </div>
             <div class="bridge-node">
-              <span class="label">3. BROWSER CODEC</span>
+              <div class="label-row">
+                <span class="label">3. BROWSER CODEC</span>
+                <button id="setCodecBtn" class="hs-link muted-pill" type="button" disabled title="Custom codec picker coming soon (or pass ?codec= in URL)">Set Codec</button>
+              </div>
               <strong id="wasmNodeDetail" class="bridge-val">Loading…</strong>
               <span class="sub">In-Browser Decoder</span>
             </div>
@@ -232,6 +232,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261117c"></script>
+  <script type="module" src="js/main.js?v=20261117d"></script>
 </body>
 </html>

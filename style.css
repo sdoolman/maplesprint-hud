@@ -98,8 +98,10 @@ h2 { font-size: 1rem; font-weight: 700; }
 .guide-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .guide-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
 .guide-map-title { font-size: 0.94rem; font-weight: 700; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.hs-link { font-size: 0.7rem; font-weight: 700; color: #ffedd5; text-decoration: none; border: 1px solid rgba(255, 148, 41, 0.4); background: rgba(255, 148, 41, 0.14); padding: 1px 6px; border-radius: 6px; }
-.hs-link:hover { background: rgba(255, 148, 41, 0.28); }
+.hs-link { font-size: 0.7rem; font-weight: 700; color: #ffedd5; text-decoration: none; border: 1px solid rgba(255, 148, 41, 0.4); background: rgba(255, 148, 41, 0.14); padding: 1px 6px; border-radius: 6px; font-family: inherit; }
+.hs-link:hover:not(:disabled) { background: rgba(255, 148, 41, 0.28); }
+.hs-link.muted-pill,
+.hs-link:disabled { color: var(--muted); border-color: var(--border); background: rgba(255, 255, 255, 0.04); cursor: not-allowed; opacity: 0.7; }
 .guide-map-region { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
 .guide-badges { display: flex; gap: 6px; flex-wrap: wrap; }
 .badge { font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
