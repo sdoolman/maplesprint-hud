@@ -350,6 +350,7 @@ type EndpointServer struct {
 	wgPort         int
 	outboundIP     string
 	clientConfPath string
+	clientConfBody string
 	hudURL         string
 	sportMin       int
 	sportMax       int
@@ -371,8 +372,8 @@ func (s *EndpointServer) Handler() http.Handler {
 }
 
 func (s *EndpointServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	confOK := false
-	if s.clientConfPath != "" {
+	confOK := s.clientConfBody != ""
+	if !confOK && s.clientConfPath != "" {
 		if info, err := os.Stat(s.clientConfPath); err == nil && info.Mode().IsRegular() {
 			confOK = true
 		}
@@ -394,14 +395,19 @@ func (s *EndpointServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *EndpointServer) handleClientConf(w http.ResponseWriter, _ *http.Request) {
-	if s.clientConfPath == "" {
+	var data []byte
+	if s.clientConfBody != "" {
+		data = []byte(s.clientConfBody)
+	} else if s.clientConfPath != "" {
+		var err error
+		data, err = os.ReadFile(s.clientConfPath)
+		if err != nil {
+			log.Printf("unable to read WireGuard config: %v", err)
+			http.Error(w, "WireGuard config unavailable", http.StatusNotFound)
+			return
+		}
+	} else {
 		http.Error(w, "No WireGuard config file configured", http.StatusNotFound)
-		return
-	}
-	data, err := os.ReadFile(s.clientConfPath)
-	if err != nil {
-		log.Printf("unable to read WireGuard config: %v", err)
-		http.Error(w, "WireGuard config unavailable", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -448,15 +454,6 @@ func parseFlags() RelayConfig {
 	return cfg
 }
 
-func openPacketSource(cfg RelayConfig) (PacketSource, string, string, int, error) {
-	if cfg.ListenUDP != "" {
-		src, err := OpenUDPPacketSource(cfg.ListenUDP)
-		return src, "udp-loopback", cfg.ListenUDP, parsePortFromAddr(cfg.ListenUDP), err
-	}
-	src, err := OpenRawSocketSource(cfg.IfaceName, ethPAll)
-	return src, "interface", cfg.IfaceName, 0, err
-}
-
 func main() {
 	cfg := parseFlags()
 	logPath, logDir, closeLog := setupLogging(cfg)
@@ -475,41 +472,63 @@ func main() {
 		physIP = DetectPhysicalOutboundIP(cfg.WGSubnet)
 	}
 
-	source, mode, target, wgPort, err := openPacketSource(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer source.Close()
-
-	log.Printf("maplesprint-endpoint started: mode=%s listen=%s outbound_ip=%s ports=%d-%d", mode, target, physIP, sportMin, sportMax)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fwd := NewForwarder(source, sportMin, sportMax)
+	hub := NewRelayHub()
+	var (
+		mode           string
+		target         string
+		wgPort         int
+		clientConfBody string
+	)
+
+	if cfg.ListenUDP != "" {
+		wgEndpoint, err := StartWGRelayEndpoint(ctx, cfg, physIP, hub, sportMin, sportMax)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer wgEndpoint.Close()
+		mode = "wireguard-netstack"
+		target = cfg.ListenUDP
+		wgPort = wgEndpoint.wgPort
+		clientConfBody = wgEndpoint.ClientConf()
+	} else {
+		source, err := OpenRawSocketSource(cfg.IfaceName, ethPAll)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer source.Close()
+		mode = "interface"
+		target = cfg.IfaceName
+		fwd := &Forwarder{source: source, hub: hub, sportMin: sportMin, sportMax: sportMax}
+		go func() {
+			if err := fwd.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("forwarder stopped: %v", err)
+				stop()
+			}
+		}()
+	}
+
+	log.Printf("maplesprint-endpoint started: mode=%s listen=%s outbound_ip=%s ports=%d-%d", mode, target, physIP, sportMin, sportMax)
+
 	startAPIServer(ctx, cfg.HTTPAddr, &EndpointServer{
 		mode:           mode,
 		listenTarget:   target,
 		wgPort:         wgPort,
 		outboundIP:     physIP,
 		clientConfPath: cfg.ClientConf,
+		clientConfBody: clientConfBody,
 		hudURL:         cfg.HUDURL,
 		sportMin:       sportMin,
 		sportMax:       sportMax,
 		routes:         cfg.Routes,
-		hub:            fwd.hub,
+		hub:            hub,
 	})
 
 	if !cfg.NoBrowser {
 		openBrowser(cfg.HUDURL)
 	}
-
-	go func() {
-		if err := fwd.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("forwarder stopped: %v", err)
-			stop()
-		}
-	}()
 
 	runTray(ctx, stop, cfg, logPath, logDir)
 }

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,5 +231,151 @@ func TestParseTCPPayloadRejectsMalformedAndNonTCP(t *testing.T) {
 	binary.BigEndian.PutUint16(eth[etherOffType:etherHeaderLen], 0x0806)
 	if _, ok := parseTCPPayload(eth, arphrdEther); ok {
 		t.Fatal("expected non-IPv4 Ethernet frame to be rejected")
+	}
+}
+
+func TestWGKeyPairAndConfGeneration(t *testing.T) {
+	serverKP, err := GenerateWGKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateWGKeyPair(server) failed: %v", err)
+	}
+	clientKP, err := GenerateWGKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateWGKeyPair(client) failed: %v", err)
+	}
+	if serverKP.Private[0]&7 != 0 || serverKP.Private[31]&128 != 0 || serverKP.Private[31]&64 == 0 {
+		t.Fatal("server private key is not properly Curve25519-clamped")
+	}
+	if len(serverKP.PublicBase64()) != 44 || len(clientKP.PrivateBase64()) != 44 {
+		t.Fatalf("expected 44-char base64 WireGuard keys, got %d / %d", len(serverKP.PublicBase64()), len(clientKP.PrivateBase64()))
+	}
+	if len(serverKP.PrivateHex()) != 64 || len(clientKP.PublicHex()) != 64 {
+		t.Fatalf("expected 64-char hex WireGuard keys, got %d / %d", len(serverKP.PrivateHex()), len(clientKP.PublicHex()))
+	}
+
+	conf := BuildClientWireGuardConf(clientKP.PrivateBase64(), serverKP.PublicBase64(), wgClientCIDR, 51820, wgGameAllowedIPs)
+	for _, want := range []string{
+		"[Interface]",
+		"PrivateKey = " + clientKP.PrivateBase64(),
+		"Address = " + wgClientCIDR,
+		"[Peer]",
+		"PublicKey = " + serverKP.PublicBase64(),
+		"Endpoint = 127.0.0.1:51820",
+		"AllowedIPs = " + wgGameAllowedIPs,
+	} {
+		if !strings.Contains(conf, want) {
+			t.Fatalf("expected client conf to contain %q, got:\n%s", want, conf)
+		}
+	}
+
+	uapi := BuildUAPIConfig(serverKP.PrivateHex(), clientKP.PublicHex(), 51820, wgClientCIDR)
+	if !strings.Contains(uapi, "private_key="+serverKP.PrivateHex()) || !strings.Contains(uapi, "listen_port=51820") {
+		t.Fatalf("unexpected UAPI config:\n%s", uapi)
+	}
+}
+
+func TestValidateForwardDest(t *testing.T) {
+	wgSubnet := netip.MustParsePrefix("10.66.66.0/24")
+	if err := validateForwardDest(netip.MustParseAddr("158.115.192.10"), 8484, wgSubnet); err != nil {
+		t.Fatalf("expected public game IP to be allowed, got: %v", err)
+	}
+	for _, tc := range []struct {
+		ip   string
+		port uint16
+	}{
+		{"127.0.0.1", 8080},
+		{"192.168.1.1", 80},
+		{"10.66.66.2", 8484},
+		{"169.254.169.254", 80},
+		{"224.0.0.1", 5353},
+		{"158.115.192.10", 0},
+	} {
+		if err := validateForwardDest(netip.MustParseAddr(tc.ip), tc.port, wgSubnet); err == nil {
+			t.Fatalf("expected %s:%d to be rejected", tc.ip, tc.port)
+		}
+	}
+}
+
+func TestEndpointServerServesInMemoryClientConf(t *testing.T) {
+	cfg := DefaultRelayConfig()
+	srv := &EndpointServer{
+		mode:           "wireguard-netstack",
+		listenTarget:   "127.0.0.1:51820",
+		wgPort:         51820,
+		outboundIP:     "192.168.1.167",
+		clientConfBody: "[Interface]\nAddress = 10.66.66.2/32\n",
+		hudURL:         cfg.HUDURL,
+		sportMin:       cfg.SportMin,
+		sportMax:       cfg.SportMax,
+		routes:         cfg.Routes,
+		hub:            NewRelayHub(),
+	}
+	h := srv.Handler()
+
+	recSt := httptest.NewRecorder()
+	h.ServeHTTP(recSt, httptest.NewRequest(http.MethodGet, cfg.Routes.Status, nil))
+	var st EndpointStatus
+	if err := json.Unmarshal(recSt.Body.Bytes(), &st); err != nil {
+		t.Fatalf("invalid status JSON: %v", err)
+	}
+	if !st.ConfAvailable || st.Mode != "wireguard-netstack" {
+		t.Fatalf("expected conf_available=true and wireguard-netstack mode, got %+v", st)
+	}
+
+	recConf := httptest.NewRecorder()
+	h.ServeHTTP(recConf, httptest.NewRequest(http.MethodGet, cfg.Routes.ClientConf, nil))
+	if recConf.Code != http.StatusOK || !strings.Contains(recConf.Body.String(), "10.66.66.2/32") {
+		t.Fatalf("expected in-memory MapleSprint.conf 200 OK, got %d: %s", recConf.Code, recConf.Body.String())
+	}
+}
+
+func TestStackTUNAndBidirectionalRelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tunDev, err := NewStackTUN(ctx, netip.MustParseAddr(wgServerAddrStr), nil)
+	if err != nil {
+		t.Fatalf("NewStackTUN failed: %v", err)
+	}
+	if mtu, err := tunDev.MTU(); err != nil || mtu != wgTunnelMTU {
+		t.Fatalf("unexpected MTU: %d, err=%v", mtu, err)
+	}
+	if name, err := tunDev.Name(); err != nil || name != "maplesprint-wg0" {
+		t.Fatalf("unexpected TUN name: %q, err=%v", name, err)
+	}
+	// Invalid/truncated packet must be safely ignored without panicking.
+	n, err := tunDev.Write([][]byte{{0x60, 0x00}}, 0)
+	if err != nil || n != 0 {
+		t.Fatalf("expected non-IPv4 packet to be skipped cleanly, got n=%d err=%v", n, err)
+	}
+	_ = tunDev.Close()
+	_ = tunDev.Close() // idempotent close
+
+	// Verify relayBidirectional copies cleanly and closes both sides.
+	c1, c2 := net.Pipe()
+	c3, c4 := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		relayBidirectional(ctx, c2, c3)
+		close(done)
+	}()
+
+	msg := []byte("maplesprint-ping")
+	if _, err := c1.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(c4, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != string(msg) {
+		t.Fatalf("expected %q, got %q", msg, buf)
+	}
+	_ = c1.Close()
+	_ = c4.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relayBidirectional did not exit after peer close")
 	}
 }
