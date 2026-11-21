@@ -49,6 +49,7 @@ const wgTunnelStatus = requireEl("wgTunnelStatus");
 const endpointStatusBadge = requireEl("endpointStatusBadge");
 const outboundIpTag = requireEl("outboundIpTag");
 const wasmNodeDetail = requireEl("wasmNodeDetail");
+const softResetBtn = /** @type {HTMLButtonElement} */ (requireEl("softResetBtn"));
 const pipBtn = /** @type {HTMLButtonElement} */ (requireEl("pipBtn"));
 const wakeBtn = /** @type {HTMLButtonElement} */ (requireEl("wakeBtn"));
 const statusDot = requireEl("statusDot");
@@ -68,6 +69,7 @@ const viewSetup = requireEl("viewSetup");
 
 const manualLevelInput = /** @type {HTMLInputElement} */ (requireEl("manualLevelInput"));
 const charJobEl = /** @type {HTMLSelectElement} */ (requireEl("charJob"));
+const levelExpDetailEl = requireEl("levelExpDetail");
 const levelPctEl = requireEl("levelPct");
 const ttlEl = requireEl("ttl");
 const levelProgressBar = requireEl("levelProgressBar");
@@ -79,6 +81,7 @@ const sessionExpEl = requireEl("sessionExp");
 const lastExpEl = requireEl("lastExp");
 const killsEl = requireEl("kills");
 const lastMobEl = requireEl("lastMob");
+const killsBreakdownEl = requireEl("killsBreakdown");
 const kpmEl = requireEl("kpm");
 const dpmEl = requireEl("dpm");
 const hpEl = requireEl("hp");
@@ -90,6 +93,7 @@ const npcValueTagEl = requireEl("npcValueTag");
 const mesoSubEl = requireEl("mesoSub");
 const dropsEl = requireEl("drops");
 const dropSubEl = requireEl("dropSub");
+const dropsBreakdownEl = requireEl("dropsBreakdown");
 
 const guideLevelInput = /** @type {HTMLInputElement} */ (requireEl("guideLevel"));
 const guideJobSelect = /** @type {HTMLSelectElement} */ (requireEl("guideJob"));
@@ -97,6 +101,10 @@ const guideSortSelect = /** @type {HTMLSelectElement} */ (requireEl("guideSort")
 const guideSearchInput = /** @type {HTMLInputElement} */ (requireEl("guideSearch"));
 const guideListEl = requireEl("guideList");
 
+const splitMinTimeSelect = /** @type {HTMLSelectElement} */ (requireEl("splitMinTime"));
+const splitSortSelect = /** @type {HTMLSelectElement} */ (requireEl("splitSort"));
+const splitSearchInput = /** @type {HTMLInputElement} */ (requireEl("splitSearch"));
+const splitOnlyKillsCheck = /** @type {HTMLInputElement} */ (requireEl("splitOnlyKills"));
 const splitsTableBody = requireEl("splitsTableBody");
 const exportSplitsBtn = requireEl("exportSplitsBtn");
 const clearSplitsBtn = requireEl("clearSplitsBtn");
@@ -147,10 +155,12 @@ function createSessionState(savedLevel, savedJob, savedSplits) {
     level,
     job: normalizeJobForLevel(Number(savedJob) || 0, level),
     kills: 0,
+    /** @type {Record<number, { count: number, exp: number }>} */ killsByMob: {},
     lastMobId: /** @type {number | null} */ (null),
     mesos: 0,
     npcLootValue: 0,
     drops: 0,
+    /** @type {Record<number, number>} */ dropsByItem: {},
     lastItemId: /** @type {number | null} */ (null),
     hp: /** @type {number | null} */ (null),
     mp: /** @type {number | null} */ (null),
@@ -178,7 +188,8 @@ const state = createSessionState(
 function guideFilterForJob(jobId) {
   const id = Number(jobId) || 0;
   if (id >= 230 && id <= 232) return "cleric";
-  if (id >= 200 && id < 300) return "magician";
+  if (id >= 210 && id <= 212) return "magician_fp";
+  if (id >= 220 && id <= 222) return "magician_il";
   if (id >= 100 && id < 200) return "warrior";
   if (id >= 300 && id < 400) return "bowman";
   if (id >= 400 && id < 500) return "thief";
@@ -466,16 +477,23 @@ function computeRolling5mXph(now) {
 function computeLevelProgress(rateForEta) {
   const reqExp = CLASSIC_EXP_TABLE[state.level] || 0;
   if (state.level >= MAX_CLASSIC_LEVEL || reqExp <= 0) {
-    return { pct: 100, pctLabel: "MAX", etaLabel: "Lv. Cap" };
+    return { pct: 100, pctLabel: "MAX", etaLabel: "Lv. Cap", expDetail: "Max Level" };
   }
   let pct = 0;
+  let expDetail = `— / ${reqExp.toLocaleString()} EXP`;
   if (state.totalExp > 0) {
-    pct = Math.min(99.99, Math.max(0, (state.totalExp / reqExp) * 100));
+    const cur = Math.min(reqExp, state.totalExp);
+    const rem = Math.max(0, reqExp - cur);
+    pct = Math.min(99.99, Math.max(0, (cur / reqExp) * 100));
+    expDetail = `${cur.toLocaleString()} / ${reqExp.toLocaleString()} (${rem.toLocaleString()} to Lv.${state.level + 1})`;
   } else if (state.sessionExp > 0) {
-    pct = Math.min(99.99, Math.max(0, ((state.sessionExp % reqExp) / reqExp) * 100));
+    const cur = state.sessionExp % reqExp;
+    const rem = Math.max(0, reqExp - cur);
+    pct = Math.min(99.99, Math.max(0, (cur / reqExp) * 100));
+    expDetail = `~${rem.toLocaleString()} to Lv.${state.level + 1}`;
   }
   if (rateForEta <= 0) {
-    return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel: "ETA —" };
+    return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel: "ETA —", expDetail };
   }
   const curInLevel = state.totalExp > 0 ? Math.min(reqExp, state.totalExp) : state.sessionExp % reqExp;
   const minsLeft = (Math.max(0, reqExp - curInLevel) / rateForEta) * 60;
@@ -485,7 +503,17 @@ function computeLevelProgress(rateForEta) {
       : minsLeft < 60
       ? `ETA ${Math.ceil(minsLeft)}m`
       : `ETA ${Math.floor(minsLeft / 60)}h ${Math.round(minsLeft % 60)}m`;
-  return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel };
+  return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel, expDetail };
+}
+
+function renderBreakdownChips(container, entries, formatEntry) {
+  container.replaceChildren();
+  for (const entry of entries.slice(0, 4)) {
+    const chip = document.createElement("span");
+    chip.className = "breakdown-chip";
+    chip.textContent = formatEntry(entry);
+    container.append(chip);
+  }
 }
 
 function renderCombatAndVitals(activeSec) {
@@ -496,6 +524,16 @@ function renderCombatAndVitals(activeSec) {
   } else {
     lastMobEl.textContent = "No kills yet";
   }
+
+  const mobEntries = Object.entries(state.killsByMob)
+    .map(([id, info]) => ({ id: Number(id), count: info.count }))
+    .filter((e) => e.count > 0)
+    .sort((a, b) => b.count - a.count);
+  renderBreakdownChips(killsBreakdownEl, mobEntries, (e) => {
+    const mob = db.mobs[e.id];
+    const label = mob ? mob.name : e.id === 0 ? "Other" : `Mob #${e.id}`;
+    return `${label} ×${e.count}`;
+  });
 
   kpmEl.textContent = state.startTs ? ((state.kills * 60) / activeSec).toFixed(1) : "0.0";
   dpmEl.textContent =
@@ -524,6 +562,15 @@ function renderInventory(activeSec) {
   } else {
     dropSubEl.textContent = "No drops yet";
   }
+
+  const dropEntries = Object.entries(state.dropsByItem)
+    .map(([id, qty]) => ({ id: Number(id), qty: Number(qty) || 0 }))
+    .filter((e) => e.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+  renderBreakdownChips(dropsBreakdownEl, dropEntries, (e) => {
+    const it = db.items[e.id];
+    return `${it ? it.name : `Item #${e.id}`} ×${e.qty}`;
+  });
 }
 
 function render() {
@@ -559,6 +606,7 @@ function render() {
 
   setJobSelectValue(state.job);
   const prog = computeLevelProgress(rolling5m > 0 ? rolling5m : xphVal);
+  levelExpDetailEl.textContent = prog.expDetail;
   levelPctEl.textContent = prog.pctLabel;
   levelProgressBar.style.width = `${prog.pct.toFixed(2)}%`;
   ttlEl.textContent = prog.etaLabel;
@@ -577,6 +625,12 @@ function render() {
     mapLine.textContent = "Not connected";
   }
   eventCountEl.textContent = `${state.events.toLocaleString()} events`;
+
+  if (!viewHistory.classList.contains("hidden")) {
+    const liveSplitMs =
+      state.currentSplit && isGrinding ? (state.currentSplit.active_ms || 0) + pendingDelta : null;
+    renderSplitsTable(liveSplitMs);
+  }
 
   pipOverlay.update({
     xphVal,
@@ -608,6 +662,13 @@ const EVENT_HANDLERS = {
     if (ev.gain > 0 && mobId !== null) {
       const mob = db.mobs[mobId];
       state.lastMobId = mobId;
+      if (mob && mob.hp > 0) {
+        const dmg =
+          ev.self_kill === true || !mob.exp
+            ? mob.hp
+            : Math.round(mob.hp * Math.min(1, ev.gain / mob.exp));
+        state.damageDealt += Math.max(0, dmg);
+      }
       addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${mobId}`}`);
       clearPendingKill();
     }
@@ -616,12 +677,21 @@ const EVENT_HANDLERS = {
     if (typeof ev.total_exp === "number") state.totalExp = ev.total_exp;
     if (ev.gain > 0) {
       state.kills += 1;
+      const mobKey = mobId ?? 0;
+      const prev = state.killsByMob[mobKey] || { count: 0, exp: 0 };
+      state.killsByMob[mobKey] = { count: prev.count + 1, exp: prev.exp + ev.gain };
       state.expWindow.push({ ts: evTs, gain: ev.gain });
     }
     const split = ensureCurrentSplit(ev.map_id ?? state.mapId, state.ch, evTs);
     if (split) {
       split.exp_gained += ev.gain;
-      if (ev.gain > 0) split.kills += 1;
+      if (ev.gain > 0) {
+        split.kills += 1;
+        if (!split.killsByMob) split.killsByMob = {};
+        const mobKey = mobId ?? 0;
+        const sPrev = split.killsByMob[mobKey] || { count: 0, exp: 0 };
+        split.killsByMob[mobKey] = { count: sPrev.count + 1, exp: sPrev.exp + ev.gain };
+      }
     }
     saveSplits();
     addFeed(
@@ -634,6 +704,7 @@ const EVENT_HANDLERS = {
     setCharacterProgression(ev.level, ev.job);
     if (ev.max_hp) state.maxHp = ev.max_hp;
     if (ev.max_mp) state.maxMp = ev.max_mp;
+    if (typeof ev.total_exp === "number" && ev.total_exp >= 0) state.totalExp = ev.total_exp;
   },
   hp_mp(ev, evTs) {
     if (ev.hp != null) state.hp = ev.hp;
@@ -668,6 +739,7 @@ const EVENT_HANDLERS = {
     recordActiveTime(evTs);
     const qty = ev.qty || 1;
     state.drops += qty;
+    state.dropsByItem[ev.item_id] = (state.dropsByItem[ev.item_id] || 0) + qty;
     state.lastItemId = ev.item_id;
     const it = db.items[ev.item_id];
     const npcPrice = it && typeof it.price === "number" ? it.price * qty : 0;
@@ -713,8 +785,16 @@ function renderGuide() {
   });
 }
 
-function renderSplitsTable() {
-  splitsTableBody.innerHTML = renderSplitsHtml(state.mapSplits, db.maps);
+function renderSplitsTable(liveActiveMs = null) {
+  splitsTableBody.innerHTML = renderSplitsHtml(state.mapSplits, db.maps, {
+    mobsDb: db.mobs,
+    minTimeSec: Number(splitMinTimeSelect.value) || 0,
+    onlyKills: splitOnlyKillsCheck.checked,
+    query: splitSearchInput.value,
+    sortBy: splitSortSelect.value,
+    activeStartedTs: state.currentSplit?.started_ts ?? null,
+    liveActiveMs,
+  });
 }
 
 function handleInitMessage(d) {
@@ -822,6 +902,42 @@ guideLevelInput.addEventListener("input", renderGuide);
 guideJobSelect.addEventListener("change", renderGuide);
 guideSortSelect.addEventListener("change", renderGuide);
 guideSearchInput.addEventListener("input", renderGuide);
+
+splitMinTimeSelect.addEventListener("change", () => renderSplitsTable());
+splitSortSelect.addEventListener("change", () => renderSplitsTable());
+splitSearchInput.addEventListener("input", () => renderSplitsTable());
+splitOnlyKillsCheck.addEventListener("change", () => renderSplitsTable());
+
+function softResetSprint() {
+  clearPendingKill();
+  state.startTs = null;
+  state.activeMs = 0;
+  state.lastActiveTs = null;
+  state.sessionExp = 0;
+  state.lastExp = 0;
+  state.kills = 0;
+  state.killsByMob = {};
+  state.lastMobId = null;
+  state.mesos = 0;
+  state.npcLootValue = 0;
+  state.drops = 0;
+  state.dropsByItem = {};
+  state.lastItemId = null;
+  state.damageTaken = 0;
+  state.damageDealt = 0;
+  state.events = 0;
+  state.expWindow = [];
+  state.currentSplit = null;
+  feedEl.replaceChildren();
+  if (state.mapId !== null) {
+    ensureCurrentSplit(state.mapId, state.ch, Date.now());
+  }
+  addFeed("Started new sprint (live connection & character state preserved)");
+  renderSplitsTable();
+  render();
+}
+
+softResetBtn.addEventListener("click", softResetSprint);
 
 exportSplitsBtn.addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(state.mapSplits, null, 2)], { type: "application/json" });

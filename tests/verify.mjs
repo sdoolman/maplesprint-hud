@@ -129,7 +129,9 @@ test("OSMS elements schema, transparent 0-100 suitability rating, escaping, and 
   assert.ok(guideHtml.includes("&lt;Ant Tunnel&gt;"));
   assert.ok(guideHtml.includes("https://meowdb.com/msclassic/maps/010004140"));
   assert.ok(guideHtml.includes("https://henesys.gg/maps/10004140"));
-  assert.match(guideHtml, /Fit \d+\/100/);
+  assert.match(guideHtml, /<details class="guide-card">/);
+  assert.match(guideHtml, /<table class="mob-table">/);
+  assert.match(guideHtml, />\d+<span>\/100<\/span>/);
   assert.ok(!html.includes('id="workerUrl"'), "Legacy workerUrl ID must not appear in index.html");
 
   const splitsHtml = renderSplitsHtml(
@@ -264,9 +266,9 @@ test("guide scoring, filtering, sorting, recordedRateForMap, and empty states wo
   };
 
   assert.ok(scoreMap(highSpawnEntry, 24, "warrior").affinityTags.some((t) => t.includes("High Spawn AoE")));
-  assert.ok(scoreMap(highSpawnEntry, 24, "magician").affinityTags.some((t) => t.includes("Elemental Weak")));
-  assert.ok(scoreMap(highSpawnEntry, 24, "bowman").affinityTags.some((t) => t.includes("High EXP / HP")));
-  assert.ok(scoreMap(highSpawnEntry, 24, "thief").affinityTags.some((t) => t.includes("High EXP / HP")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "magician_il").affinityTags.some((t) => t.includes("Ice / Lightning Weak")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "bowman").affinityTags.some((t) => t.includes("Low HP/EXP")));
+  assert.ok(scoreMap(highSpawnEntry, 24, "thief").affinityTags.some((t) => t.includes("Low HP/EXP")));
   assert.ok(scoreMap(highSpawnEntry, 24, "cleric").score < scoreMap(highSpawnEntry, 24, "all").score);
 
   const splits = [
@@ -338,4 +340,107 @@ test("job selector enforces Classic World advancement level gates (1st Lv8/10, 2
   assert.equal(normalizeJobForLevel(111, 29), 100);
   assert.equal(normalizeJobForLevel(230, 8), 200);
   assert.equal(normalizeJobForLevel(100, 9), 0);
+});
+
+test("R8 formula uses ±4 level window, inverse HP/EXP (max 35 at <=6), spatial density, and elemental resistance penalties", () => {
+  const maps = normalizeMaps({
+    regions: [
+      {
+        region: "Victoria",
+        maps: [
+          {
+            id: 10003090,
+            name: "Compact Swamp",
+            street_name: "Warning Street",
+            is_town: false,
+            mob_capacity: 24,
+            mob_positions: [
+              { id: 18, x: 100, y: 100 },
+              { id: 18, x: 900, y: 400 },
+            ],
+          },
+          {
+            id: 10005076,
+            name: "Huge Sprawling Tunnel",
+            street_name: "Dungeon",
+            is_town: false,
+            mob_capacity: 24,
+            mob_positions: [
+              { id: 18, x: 0, y: 0 },
+              { id: 18, x: 3000, y: 3500 },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const mobs = normalizeMonsters(
+    {
+      monsters: [
+        {
+          id: 18,
+          name: "Jr. Necki",
+          level: 21,
+          exp: 40,
+          hp: 240, // 6.0 HP/EXP -> max 35 pts
+          undead: 0,
+          elements: { Holy: "Strong", Fire: "Weak", Ice: "Strong" },
+          maps: [
+            { id: 10003090, count: 24 },
+            { id: 10005076, count: 24 },
+          ],
+        },
+      ],
+    },
+    maps
+  );
+  const idx = buildGuideIndex(maps, mobs);
+  const compact = idx.find((m) => m.mapId === 10003090);
+  const huge = idx.find((m) => m.mapId === 10005076);
+  assert.ok(compact && huge);
+  assert.equal(compact.avgHpPerExp, 6);
+  assert.ok(compact.spatialDensity > huge.spatialDensity);
+
+  const sCompact = scoreMap(compact, 21, "all");
+  const sHuge = scoreMap(huge, 21, "all");
+  assert.equal(sCompact.parts.efficiency, 35);
+  assert.ok(sCompact.parts.density > sHuge.parts.density);
+
+  // Cleric: -15 on Holy:Strong; F/P: +12 on Fire:Weak; I/L: -12 on Ice:Strong
+  assert.equal(scoreMap(compact, 21, "cleric").parts.classBonus, -15);
+  assert.equal(scoreMap(compact, 21, "magician_fp").parts.classBonus, 12);
+  assert.equal(scoreMap(compact, 21, "magician_il").parts.classBonus, -12);
+
+  // Strict ±4 level window excludes Lv.21 map when char is Lv.15 (diff +6) or Lv.27 (diff -6)
+  const tooLow = renderGuideHtml({ loaded: true, guideMaps: idx, mapSplits: [], charLv: 15, jobFilter: "all", sortBy: "score", query: "" });
+  assert.match(tooLow, /No matching maps found/);
+});
+
+test("Phase 0 HUD: soft reset, per-mob kills, EXP detail, dmg/m, and filtered real-time Map Log work accurately", () => {
+  assert.match(mainJs, /function softResetSprint\(\)/);
+  const softResetBlock = mainJs.match(/function softResetSprint\(\)\s*\{([\s\S]*?)\n\}/)?.[1] || "";
+  assert.ok(!softResetBlock.includes("decoder.reset"), "Soft reset must not reset the live packet decoder");
+  assert.ok(mainJs.includes("state.damageDealt += Math.max(0, dmg)"), "exp_gain must update damageDealt for dmg/m");
+  assert.ok(mainJs.includes("state.killsByMob"), "HUD must track exact killsByMob");
+  assert.ok(mainJs.includes("levelExpDetailEl.textContent"), "HUD must render EXP-to-next-level detail");
+
+  const splits = [
+    { map_id: 10003090, channel: 33, started_ts: 1000, active_ms: 4000, exp_gained: 0, kills: 0, mesos_gained: 0, drops: 0 },
+    { map_id: 10003090, channel: 33, started_ts: 2000, active_ms: 60_000, exp_gained: 1160, kills: 20, killsByMob: { 29: { count: 20, exp: 1160 } }, mesos_gained: 500, drops: 4 },
+  ];
+  const filteredHtml = renderSplitsHtml(
+    splits,
+    { 10003090: { name: "The Swamp of Despair I", street: "Warning Street" } },
+    {
+      mobsDb: { 29: { name: "Ligator" } },
+      minTimeSec: 10,
+      onlyKills: true,
+      activeStartedTs: 2000,
+      liveActiveMs: 90_000,
+    }
+  );
+  assert.match(filteredHtml, /LIVE/);
+  assert.match(filteredHtml, /Ligator ×20/);
+  assert.match(filteredHtml, /00:01:30/);
+  assert.ok(!filteredHtml.includes("00:00:04"), "0-kill visit below minTimeSec must be filtered out");
 });

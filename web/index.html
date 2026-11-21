@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="css/style.css?v=20261117l" />
+  <link rel="stylesheet" href="css/style.css?v=20261121a" />
 </head>
 <body>
   <main class="wrap">
@@ -17,6 +17,7 @@
         <p id="mapLine" class="muted">Not connected</p>
       </div>
       <div class="top-actions">
+        <button id="softResetBtn" class="pill wake" type="button" title="Start a new logical sprint (keeps connection, HP/MP, level, job, and current map)">↻ New Sprint</button>
         <button id="pipBtn" class="pill wake" type="button" title="Pop out always-on-top Mini Overlay">⧉ Mini</button>
         <button id="wakeBtn" class="pill wake" type="button" aria-pressed="false" title="Keep screen awake">☀ Wake</button>
         <span id="statusDot" class="pill offline">OFFLINE</span>
@@ -41,6 +42,7 @@
                 <select id="charJob" class="job-badge" aria-label="Character Job" title="Character Job (auto-updates from packet stream or set manually)"></select>
               </div>
               <div class="level-eta">
+                <span id="levelExpDetail" class="level-exp-detail">— / — EXP</span>
                 <span id="levelPct" class="level-pct">0.00%</span>
                 <span id="ttl" class="eta-pill">ETA —</span>
               </div>
@@ -65,6 +67,7 @@
               <div class="label">KILLS</div>
               <div id="kills" class="val">0</div>
               <div id="lastMob" class="sub">No kills yet</div>
+              <div id="killsBreakdown" class="breakdown-list"></div>
             </div>
             <div class="card">
               <div class="label">KILLS / MIN</div>
@@ -90,6 +93,7 @@
               <div class="label">DROPS</div>
               <div id="drops" class="val accent">0</div>
               <div id="dropSub" class="sub">No drops yet</div>
+              <div id="dropsBreakdown" class="breakdown-list"></div>
             </div>
           </section>
         </div>
@@ -107,13 +111,21 @@
     <!-- TAB 2: BEST MAPS BY LEVEL & JOB GUIDE -->
     <div id="viewGuide" class="tab-view hidden">
       <section class="card guide-controls">
-        <div class="guide-header-text">
-          <h2>Classic World — Optimal Maps by Level &amp; Class</h2>
-          <p class="muted">Ranked by transparent Level Fit (0–35), EXP / 100 HP efficiency (0–35), Spawn Density (0–30), and explicit OSMS elemental/undead synergy.</p>
+        <div class="guide-header-row">
+          <div>
+            <h2>Best Training Maps</h2>
+            <p class="muted">Find the right spot for your level and class. Expand any card for full monsters &amp; breakdown.</p>
+          </div>
+          <details class="how-it-works">
+            <summary>How scoring works</summary>
+            <div class="how-body">
+              Maps within <strong>±4 levels</strong> of your character are scored 0–100: <strong>Level Fit</strong> (up to 35 pts), <strong>HP/EXP Efficiency</strong> (inverse curve, max 35 pts at ≤6.0 HP/EXP), <strong>Spatial Density</strong> (up to 30 pts using concurrent mob capacity ÷ active hunting surface area), and <strong>Class Synergy</strong> (Cleric +15/−15/−3; F/P &amp; I/L +12/−12; Warrior/Ranged fit).
+            </div>
+          </details>
         </div>
         <div class="guide-filters">
           <label class="filter-field">
-            <span class="label">YOUR LEVEL</span>
+            <span class="label">LEVEL</span>
             <input id="guideLevel" type="number" min="1" max="100" value="25" />
           </label>
           <label class="filter-field">
@@ -121,8 +133,9 @@
             <select id="guideJob">
               <option value="all">All Classes</option>
               <option value="warrior">Warrior (Fighter / Page / Spearman)</option>
-              <option value="magician">Magician (I/L / F/P Wizard)</option>
-              <option value="cleric">Magician (Cleric / Priest — Holy vs Undead)</option>
+              <option value="magician_fp">Magician — Fire / Poison (F/P)</option>
+              <option value="magician_il">Magician — Ice / Lightning (I/L)</option>
+              <option value="cleric">Magician — Cleric / Priest (Holy)</option>
               <option value="bowman">Bowman (Hunter / Crossbowman)</option>
               <option value="thief">Thief (Assassin / Bandit)</option>
             </select>
@@ -130,15 +143,16 @@
           <label class="filter-field">
             <span class="label">SORT BY</span>
             <select id="guideSort">
-              <option value="score">Recommended Efficiency</option>
+              <option value="score">Match Score</option>
+              <option value="hp_exp">Lowest HP / EXP</option>
+              <option value="spawns">Spatial Density</option>
               <option value="recorded">My Recorded EXP / HR</option>
               <option value="exp">Mob Base EXP</option>
-              <option value="spawns">Spawn Density</option>
             </select>
           </label>
           <label class="filter-field search-field">
             <span class="label">SEARCH MAP OR MOB</span>
-            <input id="guideSearch" type="text" placeholder="e.g. Ant Tunnel, Evil Eye, Kerning..." autocomplete="off" />
+            <input id="guideSearch" type="text" placeholder="Search map, street, or monster…" autocomplete="off" />
           </label>
         </div>
       </section>
@@ -151,28 +165,60 @@
         <div class="history-header">
           <div>
             <h2>Per-Map Farming Splits</h2>
-            <p class="muted">Automatically recorded on map transitions during your active session.</p>
+            <p class="muted">Updates in real time as you grind. Filter brief pass-throughs or sort by performance.</p>
           </div>
           <div class="top-actions">
             <button id="exportSplitsBtn" class="pill wake" type="button">⇩ Export JSON</button>
             <button id="clearSplitsBtn" class="pill wake" type="button">Clear Log</button>
           </div>
         </div>
+        <div class="splits-filters">
+          <label class="filter-field">
+            <span class="label">MIN TIME</span>
+            <select id="splitMinTime">
+              <option value="0">All visits</option>
+              <option value="10">≥ 10 sec</option>
+              <option value="60">≥ 1 min</option>
+              <option value="300">≥ 5 min</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span class="label">SORT BY</span>
+            <select id="splitSort">
+              <option value="recent">Most Recent</option>
+              <option value="xph">EXP / HR</option>
+              <option value="exp">EXP Gained</option>
+              <option value="time">Active Time</option>
+              <option value="kills">Kills</option>
+              <option value="mesos">Mesos</option>
+              <option value="drops">Drops</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span class="label">SEARCH</span>
+            <input id="splitSearch" type="text" placeholder="Filter by map, street, or Ch…" autocomplete="off" />
+          </label>
+          <label class="check-field">
+            <input id="splitOnlyKills" type="checkbox" />
+            <span>Hide 0-kill visits</span>
+          </label>
+        </div>
         <div class="table-wrap">
           <table class="splits-table">
             <thead>
               <tr>
                 <th>Map</th>
-                <th>Active Time</th>
-                <th>EXP Gained</th>
-                <th>EXP / HR</th>
-                <th>Kills</th>
-                <th>Mesos</th>
-                <th>Drops</th>
+                <th class="num">Active Time</th>
+                <th class="num">EXP Gained</th>
+                <th class="num">EXP / HR</th>
+                <th class="num">Kills</th>
+                <th>Mobs</th>
+                <th class="num">Mesos</th>
+                <th class="num">Drops</th>
               </tr>
             </thead>
             <tbody id="splitsTableBody">
-              <tr><td colspan="7" class="empty-cell">No map splits recorded yet. Connect to your local endpoint to track map performance!</td></tr>
+              <tr><td colspan="8" class="empty-cell">No map splits recorded yet. Connect to your local endpoint to track map performance!</td></tr>
             </tbody>
           </table>
         </div>
@@ -216,7 +262,7 @@
           <div class="actions">
             <button id="connectBtn" type="button" disabled title="Waiting for local endpoint relay at 127.0.0.1:8080">Endpoint Offline</button>
             <button id="downloadWgConfBtn" class="btn-sec" type="button">⬇ MapleSprint.conf</button>
-            <button id="resetBtn" class="btn-sec" type="button">Reset Session</button>
+            <button id="resetBtn" class="btn-sec" type="button" title="Hard-reset the in-browser packet decoder state">Hard Reset Decoder</button>
           </div>
         </div>
 
@@ -232,6 +278,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261117l"></script>
+  <script type="module" src="js/main.js?v=20261121a"></script>
 </body>
 </html>

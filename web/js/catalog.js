@@ -11,19 +11,26 @@ function extractElements(mob) {
     }
     return out;
   }
-  // Support WZ elemAttr codes where '3' denotes elemental weakness
+  // Support WZ elemAttr codes: 1 = Immune, 2 = Strong (resist), 3 = Weak
   const wzAttr = String(mob?.elemAttr || mob?.elem_attr || "");
-  if (wzAttr.includes("H3")) out.Holy = "Weak";
-  if (wzAttr.includes("F3")) out.Fire = "Weak";
-  if (wzAttr.includes("I3")) out.Ice = "Weak";
-  if (wzAttr.includes("L3")) out.Lightning = "Weak";
-  if (wzAttr.includes("S3")) out.Poison = "Weak";
+  const map = [
+    ["H", "Holy"],
+    ["F", "Fire"],
+    ["I", "Ice"],
+    ["L", "Lightning"],
+    ["S", "Poison"],
+  ];
+  for (const [code, name] of map) {
+    if (wzAttr.includes(`${code}3`)) out[name] = "Weak";
+    else if (wzAttr.includes(`${code}1`)) out[name] = "Immune";
+    else if (wzAttr.includes(`${code}2`)) out[name] = "Strong";
+  }
   return out;
 }
 
 /** @param {any} mapsData */
 export function normalizeMaps(mapsData) {
-  /** @type {Record<number, { name: string, street: string, isTown?: boolean, spawns: Array<{ id: number, count: number }> }>} */
+  /** @type {Record<number, { name: string, street: string, isTown?: boolean, mobCapacity?: number, mobPositions?: Array<{ id: number, x: number, y: number }>, spawns: Array<{ id: number, count: number }> }>} */
   const maps = {};
   if (Array.isArray(mapsData?.regions)) {
     for (const reg of mapsData.regions) {
@@ -32,6 +39,8 @@ export function normalizeMaps(mapsData) {
           name: m.name,
           street: m.street_name || reg.region || "",
           isTown: Boolean(m.is_town),
+          mobCapacity: Number(m.mob_capacity) || 0,
+          mobPositions: Array.isArray(m.mob_positions) ? m.mob_positions : [],
           spawns: [],
         };
       }
@@ -45,6 +54,8 @@ export function normalizeMaps(mapsData) {
         name: m.name || `Map #${id}`,
         street: m.street || m.street_name || "",
         isTown: Boolean(m.isTown || m.is_town),
+        mobCapacity: Number(m.mobCapacity || m.mob_capacity) || 0,
+        mobPositions: Array.isArray(m.mobPositions || m.mob_positions) ? (m.mobPositions || m.mob_positions) : [],
         spawns: Array.isArray(m.spawns) ? m.spawns : [],
       };
     }
@@ -114,6 +125,57 @@ export function normalizeItems(itemsData) {
   return items;
 }
 
+const SPATIAL_PAD_X = 200;
+const SPATIAL_PAD_Y = 150;
+const MIN_AREA_MPX = 0.1;
+const RESIST_SHARE_THRESHOLD = 0.2;
+
+function isResist(val) {
+  return val === "Strong" || val === "Immune";
+}
+
+function computeMapSpatial(m, totalSpawns) {
+  const pos = Array.isArray(m.mobPositions) ? m.mobPositions : [];
+  const cap = Number(m.mobCapacity) || 0;
+  if (pos.length < 2) {
+    return {
+      widthPx: null,
+      heightPx: null,
+      surfaceAreaMPx: null,
+      effectiveMobs: cap > 0 ? Math.min(cap, totalSpawns) : totalSpawns,
+      spatialDensity: null,
+    };
+  }
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const pt of pos) {
+    const x = Number(pt.x);
+    const y = Number(pt.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    return {
+      widthPx: null,
+      heightPx: null,
+      surfaceAreaMPx: null,
+      effectiveMobs: cap > 0 ? Math.min(cap, totalSpawns) : totalSpawns,
+      spatialDensity: null,
+    };
+  }
+  const widthPx = Math.round(maxX - minX + SPATIAL_PAD_X);
+  const heightPx = Math.round(maxY - minY + SPATIAL_PAD_Y);
+  const surfaceAreaMPx = Number(Math.max(MIN_AREA_MPX, (widthPx * heightPx) / 1_000_000).toFixed(2));
+  const effectiveMobs = cap > 0 ? Math.min(cap, pos.length) : pos.length;
+  const spatialDensity = Number((effectiveMobs / surfaceAreaMPx).toFixed(1));
+  return { widthPx, heightPx, surfaceAreaMPx, effectiveMobs, spatialDensity };
+}
+
 /**
  * Builds pre-aggregated map spawn summaries from explicit OSMS catalog fields.
  * @param {ReturnType<typeof normalizeMaps>} maps
@@ -136,9 +198,14 @@ export function buildGuideIndex(maps, mobs) {
     let weightedLevel = 0;
     let weightedExp = 0;
     let weightedRatio = 0;
+    let weightedHpPerExp = 0;
+    let holyResistSpawns = 0;
+    let fpResistSpawns = 0;
+    let ilResistSpawns = 0;
     let hasUndead = false;
     let hasHolyWeak = false;
     let hasFireWeak = false;
+    let hasPoisonWeak = false;
     let hasIceWeak = false;
     let hasLightningWeak = false;
 
@@ -152,41 +219,80 @@ export function buildGuideIndex(maps, mobs) {
       if (undead) hasUndead = true;
       if (elems.Holy === "Weak") hasHolyWeak = true;
       if (elems.Fire === "Weak") hasFireWeak = true;
+      if (elems.Poison === "Weak") hasPoisonWeak = true;
       if (elems.Ice === "Weak") hasIceWeak = true;
       if (elems.Lightning === "Weak") hasLightningWeak = true;
 
+      if (isResist(elems.Holy)) holyResistSpawns += count;
+      if ((isResist(elems.Fire) && elems.Poison !== "Weak") || (isResist(elems.Poison) && elems.Fire !== "Weak")) {
+        fpResistSpawns += count;
+      }
+      if ((isResist(elems.Ice) && elems.Lightning !== "Weak") || (isResist(elems.Lightning) && elems.Ice !== "Weak")) {
+        ilResistSpawns += count;
+      }
+
+      const hpPerExp = Number((hp / mob.exp).toFixed(2));
       totalSpawns += count;
       weightedLevel += mob.level * count;
       weightedExp += mob.exp * count;
       weightedRatio += (mob.exp / hp) * count;
+      weightedHpPerExp += hpPerExp * count;
       mobDetails.push({
         id: Number(mobIdStr),
         name: mob.name,
         level: mob.level,
         exp: mob.exp,
         hp,
+        hpPerExp,
         count,
         undead,
+        elements: elems,
       });
     }
 
     if (totalSpawns === 0 || mobDetails.length === 0) continue;
-    mobDetails.sort((a, b) => b.count * b.exp - a.count * a.exp);
+    mobDetails.sort((a, b) => b.count - a.count || b.count * b.exp - a.count * a.exp);
+    const dominantMob = mobDetails[0];
+    const domElems = dominantMob.elements || {};
+    const spatial = computeMapSpatial(m, totalSpawns);
+
+    const dominantHolyWeak = dominantMob.undead || domElems.Holy === "Weak";
+    const hasHolyResist = isResist(domElems.Holy) || holyResistSpawns / totalSpawns >= RESIST_SHARE_THRESHOLD;
+    const dominantFpWeak = domElems.Fire === "Weak" || domElems.Poison === "Weak";
+    const hasFpResist =
+      (isResist(domElems.Fire) && domElems.Poison !== "Weak") ||
+      (isResist(domElems.Poison) && domElems.Fire !== "Weak") ||
+      fpResistSpawns / totalSpawns >= RESIST_SHARE_THRESHOLD;
+    const dominantIlWeak = domElems.Ice === "Weak" || domElems.Lightning === "Weak";
+    const hasIlResist =
+      (isResist(domElems.Ice) && domElems.Lightning !== "Weak") ||
+      (isResist(domElems.Lightning) && domElems.Ice !== "Weak") ||
+      ilResistSpawns / totalSpawns >= RESIST_SHARE_THRESHOLD;
 
     list.push({
       mapId,
       name: m.name,
       street: m.street || "Maple World",
       totalSpawns,
+      ...spatial,
       avgLevel: Math.round(weightedLevel / totalSpawns),
       avgExp: Math.round(weightedExp / totalSpawns),
       avgRatio: weightedRatio / totalSpawns,
+      avgHpPerExp: Number((weightedHpPerExp / totalSpawns).toFixed(2)),
+      dominantMob,
       hasUndead,
       hasHolyWeak,
       hasFireWeak,
+      hasPoisonWeak,
       hasIceWeak,
       hasLightningWeak,
-      mobs: mobDetails.slice(0, 4),
+      dominantHolyWeak,
+      hasHolyResist,
+      dominantFpWeak,
+      hasFpResist,
+      dominantIlWeak,
+      hasIlResist,
+      mobs: mobDetails,
     });
   }
   return list;
