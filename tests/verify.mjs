@@ -7,8 +7,10 @@ import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } fro
 import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, base64ToBytes, eligibleJobsForLevel, escapeHtml, formatCompact, formatDuration, minLevelForJob, normalizeJobForLevel } from "../web/js/constants.js";
 import { fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "../web/js/endpoint.js";
 import { recordedRateForMap, renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
+import { SessionModel } from "../web/js/session-model.js";
 import {
   SPRINT_TEMPLATES,
+  SprintStore,
   buildChallengeLibrary,
   createDefaultChallenges,
   createTargetSprint,
@@ -26,6 +28,7 @@ const webDir = path.join(rootDir, "web");
 const html = readFileSync(path.join(webDir, "index.html"), "utf8");
 const css = readFileSync(path.join(webDir, "css/style.css"), "utf8");
 const mainJs = readFileSync(path.join(webDir, "js/main.js"), "utf8");
+const sessionModelJs = readFileSync(path.join(webDir, "js/session-model.js"), "utf8");
 const jsFiles = readdirSync(path.join(webDir, "js"))
   .filter((f) => f.endsWith(".js"))
   .map((f) => path.join(webDir, "js", f));
@@ -316,17 +319,17 @@ test("guide scoring, filtering, sorting, recordedRateForMap, and empty states wo
 });
 
 test("mob_kill and map-wide mob_damage do not pollute kills, lastMobId, feed, or active timer", () => {
-  const mobKillMatch = mainJs.match(/mob_kill\([^)]*\)\s*\{([\s\S]*?)\n  \},/);
-  assert.ok(mobKillMatch, "Expected mob_kill handler in web/js/main.js");
+  const mobKillMatch = sessionModelJs.match(/if \(ev\.type === "mob_kill"\)\s*\{([\s\S]*?)return \{/);
+  assert.ok(mobKillMatch, "Expected mob_kill branch in web/js/session-model.js");
   const body = mobKillMatch[1];
   assert.ok(!body.includes("recordActiveTime"), "mob_kill must not call recordActiveTime for other players' kills");
-  assert.ok(!body.includes("state.lastMobId"), "mob_kill must not update state.lastMobId before exp_gain");
-  assert.ok(!body.includes("state.kills"), "mob_kill must not increment state.kills directly");
-  assert.ok(!mainJs.includes("mob_damage("), "map-wide mob_damage must not be handled in Live Events feed");
-  assert.ok(!mainJs.includes("attack_hit("), "unattributed attack_hit must not be handled in Live Events feed");
+  assert.ok(!body.includes("lastMobId"), "mob_kill must not update lastMobId before exp_gain");
+  assert.ok(!body.includes("kills +="), "mob_kill must not increment kills directly");
+  assert.ok(!sessionModelJs.includes('"mob_damage"') && !mainJs.includes("mob_damage("), "map-wide mob_damage must not be handled in Live Events feed");
+  assert.ok(!sessionModelJs.includes('"attack_hit"') && !mainJs.includes("attack_hit("), "unattributed attack_hit must not be handled in Live Events feed");
   assert.match(html, /<select id="charJob"/, "charJob must be an editable select element");
   assert.match(mainJs, /Live stream active/, "mapLine must update when raw chunks are flowing prior to SetField");
-  assert.match(mainJs, /ev\.mob_id/, "exp_gain must consume decoder-attributed mob_id directly");
+  assert.match(sessionModelJs, /ev\.mob_id/, "exp_gain must consume decoder-attributed mob_id directly");
   assert.match(mainJs, /eligibleJobsForLevel/, "job dropdown must filter options by character level");
 });
 
@@ -433,8 +436,8 @@ test("Phase 0 HUD: soft reset, per-mob kills, EXP detail, dmg/m, and filtered re
   assert.match(mainJs, /function softResetSprint\(\)/);
   const softResetBlock = mainJs.match(/function softResetSprint\(\)\s*\{([\s\S]*?)\n\}/)?.[1] || "";
   assert.ok(!softResetBlock.includes("decoder.reset"), "Soft reset must not reset the live packet decoder");
-  assert.ok(mainJs.includes("state.damageDealt += Math.max(0, dmg)"), "exp_gain must update damageDealt for dmg/m");
-  assert.ok(mainJs.includes("state.killsByMob"), "HUD must track exact killsByMob");
+  assert.ok(sessionModelJs.includes("this.state.damageDealt += Math.max(0, dmg)"), "exp_gain must update damageDealt for dmg/m");
+  assert.ok(sessionModelJs.includes("this.state.killsByMob"), "SessionModel must track exact killsByMob");
   assert.ok(mainJs.includes("levelExpDetailEl.textContent"), "HUD must render EXP-to-next-level detail");
 
   const splits = [
@@ -555,4 +558,144 @@ test("Phase 1 Challenges, Plan Sprint Here CTA, 5-tab navigation, and Live Feed 
   assert.match(html, /id="tabChallenges"/);
   assert.match(html, /id="feedFilters"/);
   assert.match(html, /data-feed-cat="challenges"/);
+});
+
+function createMemoryStorage() {
+  const map = new Map();
+  return {
+    getItem(k) { return map.has(k) ? map.get(k) : null; },
+    setItem(k, v) { map.set(k, String(v)); },
+    removeItem(k) { map.delete(k); },
+  };
+}
+
+test("SessionModel (MVC Model): telemetry ingestion, self/party damage, loot NPC value, rolling XPH, and softReset", () => {
+  const storage = createMemoryStorage();
+  const model = new SessionModel({ storage });
+  const catalog = {
+    maps: { 10003090: { name: "The Swamp of Despair I", street: "Warning Street" } },
+    mobs: { 29: { name: "Ligator", level: 32, exp: 60, hp: 1200, undead: false } },
+    items: { 4000015: { name: "Alligator Skin", price: 32 } },
+  };
+
+  // Character stats & level gate enforcement
+  model.applyEvent({ type: "char_stats", level: 32, job: 111, max_hp: 1500, max_mp: 200, total_exp: 50_000 }, catalog);
+  assert.equal(model.state.level, 32);
+  assert.equal(model.state.job, 110, "Lv.32 must clamp 3rd job 111 down to 2nd job 110");
+  assert.equal(model.state.totalExp, 50_000);
+
+  // Map change creates split
+  const enterRes = model.applyEvent({ type: "map_change", map_id: 10003090, channel: 5, ts: 10_000 }, catalog);
+  assert.equal(model.state.mapId, 10003090);
+  assert.equal(model.state.mapSplits.length, 1);
+  assert.equal(enterRes.feed[0].category, "general");
+
+  // Uncorrelated mob_kill must not increment kills or active time
+  model.applyEvent({ type: "mob_kill", mob_id: 29, ts: 11_000 }, catalog);
+  assert.equal(model.state.kills, 0);
+  assert.equal(model.state.startTs, null);
+
+  // Self kill exp_gain correlates staged mob_kill within 500ms & adds full mob.hp damage
+  const killRes = model.applyEvent({ type: "exp_gain", gain: 60, total_exp: 50_060, self_kill: true, ts: 11_200 }, catalog);
+  assert.equal(model.state.kills, 1);
+  assert.equal(model.state.lastMobId, 29);
+  assert.equal(model.state.damageDealt, 1200);
+  assert.equal(model.state.killsByMob[29].count, 1);
+  assert.equal(killRes.feed.some((f) => f.category === "kills"), true);
+  assert.equal(killRes.feed.some((f) => f.category === "exp"), true);
+
+  // Party kill (30/60 EXP, self_kill: false) attributes proportional 50% HP damage
+  model.applyEvent({ type: "exp_gain", gain: 30, mob_id: 29, total_exp: 50_090, self_kill: false, ts: 21_200 }, catalog);
+  assert.equal(model.state.kills, 2);
+  assert.equal(model.state.damageDealt, 1800);
+  assert.equal(model.state.activeMs, 10_000);
+
+  // Stale mob_kill (>500ms) is ignored
+  model.applyEvent({ type: "mob_kill", mob_id: 29, ts: 25_000 }, catalog);
+  model.applyEvent({ type: "exp_gain", gain: 60, total_exp: 50_150, ts: 26_000 }, catalog);
+  assert.equal(model.state.killsByMob[0].count, 1, "Stale pending kill >500ms must not be falsely attributed");
+
+  // Item loot + meso loot + hp/mp
+  const lootRes = model.applyEvent({ type: "item_loot", item_id: 4000015, qty: 3, ts: 26_500 }, catalog);
+  assert.equal(model.state.drops, 3);
+  assert.equal(model.state.dropsByItem[4000015], 3);
+  assert.equal(model.state.npcLootValue, 96);
+  assert.equal(lootRes.feed[0].category, "drops");
+
+  model.applyEvent({ type: "meso_loot", amount: 500, ts: 27_000 }, catalog);
+  assert.equal(model.state.mesos, 500);
+
+  const hpRes = model.applyEvent({ type: "hp_mp", hp: 1400, mp: 180, damage_taken: 100, mp_delta: -20, ts: 27_500 }, catalog);
+  assert.equal(model.state.damageTaken, 100);
+  assert.equal(hpRes.mpDeltaText, "-20 MP");
+
+  // Rolling 5m XPH & level progress
+  assert.ok(model.computeRolling5mXph(27_500) > 0);
+  const lvlProg = model.computeLevelProgress(100_000);
+  assert.ok(lvlProg.pct > 0 && lvlProg.expDetail.includes("to Lv.33"));
+
+  // Soft reset clears sprint counters but preserves character & map
+  model.softReset(30_000);
+  assert.equal(model.state.sessionExp, 0);
+  assert.equal(model.state.kills, 0);
+  assert.deepEqual(model.state.killsByMob, {});
+  assert.equal(model.state.drops, 0);
+  assert.equal(model.state.damageDealt, 0);
+  assert.equal(model.state.level, 32);
+  assert.equal(model.state.job, 110);
+  assert.equal(model.state.totalExp, 50_150);
+  assert.equal(model.state.hp, 1400);
+  assert.equal(model.state.mapId, 10003090);
+  assert.equal(model.state.ch, 5);
+  assert.equal(model.state.mapSplits.length, 2, "Soft reset starts a fresh split while keeping history");
+});
+
+test("SprintStore (MVC Store): persistence, single-fire sprint completion, weekly counter, pin/reroll, and resetForNewSprint", () => {
+  const storage = createMemoryStorage();
+  const store = new SprintStore({ storage, initialLevel: 25 });
+  assert.equal(store.activeChallenges.length, 3);
+  assert.equal(store.getWeeklySprintCount(100_000), 0);
+
+  // Start a 50-kill sprint
+  const sprint = createTargetSprint({ type: "kills", value: 50, level: 25 });
+  store.startSprint(sprint);
+
+  // Partial progress
+  const mid = store.evaluateAndSync({ kills: 25, sessionExp: 0, mesos: 0, npcLootValue: 0, drops: 0, mapSplits: [] }, 60_000, { kpm: 10 }, 100_000);
+  assert.equal(mid.sprintProgress?.pct, 50);
+  assert.equal(mid.sprintJustCompleted, null);
+  assert.equal(mid.newlyCompletedChallenges.length, 0);
+
+  // Complete sprint + 100-kill & 25k-meso default challenges
+  const done = store.evaluateAndSync({ kills: 100, sessionExp: 0, mesos: 30_000, npcLootValue: 0, drops: 0, mapSplits: [] }, 120_000, { kpm: 20 }, 110_000);
+  assert.ok(done.sprintJustCompleted !== null);
+  assert.equal(store.getWeeklySprintCount(110_000), 1);
+  assert.equal(done.newlyCompletedChallenges.length, 2);
+
+  // Second tick does NOT double-fire completion or double-count history
+  const repeat = store.evaluateAndSync({ kills: 105, sessionExp: 0, mesos: 30_000, npcLootValue: 0, drops: 0, mapSplits: [] }, 125_000, { kpm: 20 }, 115_000);
+  assert.equal(repeat.sprintJustCompleted, null);
+  assert.equal(store.getWeeklySprintCount(115_000), 1);
+  assert.equal(repeat.newlyCompletedChallenges.length, 0);
+
+  // Persistence survives reload
+  const reloaded = new SprintStore({ storage, initialLevel: 25 });
+  assert.equal(reloaded.activeSprint?.completed, true);
+  assert.equal(reloaded.getWeeklySprintCount(115_000), 1);
+
+  // Pin replaces a completed slot first and rejects duplicates
+  assert.equal(reloaded.pinChallenge("ch_drops_30", 25), true);
+  assert.equal(reloaded.pinChallenge("ch_drops_30", 25), false);
+  assert.equal(reloaded.activeChallenges.length, 3);
+  assert.ok(reloaded.activeChallenges.some((c) => c.id === "ch_drops_30"));
+
+  // Reroll all maintains 3 distinct challenges
+  reloaded.rerollAll(25);
+  assert.equal(reloaded.activeChallenges.length, 3);
+  assert.equal(new Set(reloaded.activeChallenges.map((c) => c.id)).size, 3);
+
+  // resetForNewSprint clears completed sprint & preserves weekly history
+  reloaded.resetForNewSprint();
+  assert.equal(reloaded.activeSprint, null);
+  assert.equal(reloaded.getWeeklySprintCount(120_000), 1);
 });

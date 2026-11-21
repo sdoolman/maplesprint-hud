@@ -2,18 +2,34 @@
 "use strict";
 
 import { CLASSIC_EXP_TABLE, MAX_CLASSIC_LEVEL, escapeHtml, formatCompact, formatDuration } from "./constants.js";
+import { loadJson, saveJson } from "./session-model.js";
 
 export const SPRINT_CONFIG = Object.freeze({
   maxActiveChallenges: 3,
   longSessionMins: 60,
   msPerMin: 60_000,
   msPerHour: 3_600_000,
+  weekMs: 7 * 86_400_000,
+  maxHistory: 50,
   defaultXphFallback: 45_000,
   defaultKpmFallback: 12,
   defaultMphFallback: 35_000,
   defaultDpmFallback: 4,
 });
 
+/**
+ * @typedef {object} SprintTemplate
+ * @property {string} id
+ * @property {string} name
+ * @property {import("./types.js").SprintGoalType} type
+ * @property {number} value
+ * @property {import("./types.js").SprintPace} pace
+ * @property {"exp_pct" | "kills" | "mesos" | "drops"} [secondaryType]
+ * @property {number} [secondaryValue]
+ * @property {import("./types.js").SprintCompoundRule} [compound]
+ */
+
+/** @type {readonly SprintTemplate[]} */
 export const SPRINT_TEMPLATES = Object.freeze([
   { id: "tpl_exp_5", name: "+5% EXP Push", type: "exp_pct", value: 5, pace: "balanced" },
   { id: "tpl_time_30", name: "30m Focused Grind", type: "time", value: 30, pace: "balanced" },
@@ -64,20 +80,43 @@ export function expForPercentDelta(startLevel, currentExpInLevel, pctDelta) {
 
 /**
  * Creates a live target sprint object from builder inputs.
- * @param {any} opts
+ * @param {{
+ *   type?: import("./types.js").SprintGoalType,
+ *   value?: number,
+ *   level?: number,
+ *   totalExp?: number,
+ *   pace?: import("./types.js").SprintPace,
+ *   compound?: import("./types.js").SprintCompoundRule,
+ *   secondaryType?: "exp_pct" | "kills" | "mesos" | "drops",
+ *   secondaryValue?: number,
+ *   mobId?: number | string | null,
+ *   mobName?: string | null,
+ *   mapId?: number | string | null,
+ *   mapName?: string | null,
+ *   name?: string,
+ * }} opts
+ * @returns {import("./types.js").TargetSprint}
  */
 export function createTargetSprint(opts) {
+  /** @type {import("./types.js").SprintGoalType} */
   const type = opts.type || "exp_pct";
   const value = Math.max(1, Number(opts.value) || 1);
   const level = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(opts.level) || 1));
   const totalExp = Math.max(0, Number(opts.totalExp) || 0);
+  /** @type {import("./types.js").SprintPace} */
   const pace = opts.pace || "balanced";
+  /** @type {import("./types.js").SprintCompoundRule} */
   const compound = opts.compound === "any" ? "any" : "all";
   const mobId = opts.mobId != null && opts.mobId !== "" ? Number(opts.mobId) : null;
   const mobName = opts.mobName || null;
   const mapId = opts.mapId != null && opts.mapId !== "" ? Number(opts.mapId) : null;
   const mapName = opts.mapName || null;
 
+  /**
+   * @param {"exp_pct" | "time" | "kills" | "mesos" | "drops"} gType
+   * @param {number} gVal
+   * @returns {import("./types.js").SprintGoal}
+   */
   const makeGoal = (gType, gVal) => {
     if (gType === "exp_pct") {
       return {
@@ -105,6 +144,7 @@ export function createTargetSprint(opts) {
     return { type: "drops", targetDrops: gVal, label: `${gVal} drops` };
   };
 
+  /** @type {import("./types.js").SprintGoal[]} */
   const goals = [makeGoal(type === "mix" ? "time" : type, value)];
   if (type === "mix") {
     const secType = opts.secondaryType || "exp_pct";
@@ -135,8 +175,9 @@ export function createTargetSprint(opts) {
 
 /**
  * Estimates completion duration and difficulty for a planned target sprint.
- * @param {any} sprint
- * @param {{ xph?: number, kpm?: number, mph?: number, dpm?: number }} rates
+ * @param {import("./types.js").TargetSprint} sprint
+ * @param {import("./types.js").MeasuredRates} [rates]
+ * @returns {import("./types.js").SprintEstimate}
  */
 export function estimateSession(sprint, rates = {}) {
   const xph = rates.xph && rates.xph > 0 ? rates.xph : SPRINT_CONFIG.defaultXphFallback;
@@ -151,11 +192,11 @@ export function estimateSession(sprint, rates = {}) {
   );
 
   const minsPerGoal = sprint.goals.map((g) => {
-    if (g.type === "exp_pct") return (g.targetExp / xph) * 60;
-    if (g.type === "time") return g.targetMs / SPRINT_CONFIG.msPerMin;
-    if (g.type === "kills") return g.targetKills / kpm;
-    if (g.type === "mesos") return (g.targetMesos / mph) * 60;
-    return g.targetDrops / dpm;
+    if (g.type === "exp_pct") return ((g.targetExp || 0) / xph) * 60;
+    if (g.type === "time") return (g.targetMs || 0) / SPRINT_CONFIG.msPerMin;
+    if (g.type === "kills") return (g.targetKills || 0) / kpm;
+    if (g.type === "mesos") return ((g.targetMesos || 0) / mph) * 60;
+    return (g.targetDrops || 0) / dpm;
   });
 
   const estMins =
@@ -163,6 +204,7 @@ export function estimateSession(sprint, rates = {}) {
       ? Math.min(...minsPerGoal)
       : Math.max(...minsPerGoal);
   const roundedMins = Math.max(1, Math.round(estMins));
+  /** @type {"Relaxed" | "Balanced" | "Ambitious"} */
   const difficulty = roundedMins <= 20 ? "Relaxed" : roundedMins <= 45 ? "Balanced" : "Ambitious";
   const suggestSplit = roundedMins > SPRINT_CONFIG.longSessionMins;
   return {
@@ -178,26 +220,29 @@ export function estimateSession(sprint, rates = {}) {
 
 /**
  * Evaluates live progress of the active target sprint against current HUD state.
- * @param {any} sprint
- * @param {any} state
+ * @param {import("./types.js").TargetSprint | null} sprint
+ * @param {Partial<import("./types.js").SessionState>} state
  * @param {number} effectiveActiveMs
- * @param {{ xph?: number, kpm?: number, mph?: number, dpm?: number }} [rates]
+ * @param {import("./types.js").MeasuredRates} [rates]
+ * @returns {import("./types.js").SprintProgress | null}
  */
 export function evaluateSprintProgress(sprint, state, effectiveActiveMs, rates = {}) {
   if (!sprint || !Array.isArray(sprint.goals) || sprint.goals.length === 0) return null;
 
+  /** @type {import("./types.js").SubGoalProgress[]} */
   const subGoals = sprint.goals.map((g) => {
     let cur = 0;
     let target = 1;
     let curLabel = "0";
     let targetLabel = g.label;
+    /** @type {number | null} */
     let remMins = null;
 
     if (g.type === "exp_pct") {
       cur = Math.max(0, state.sessionExp || 0);
       target = Math.max(1, g.targetExp || 1);
       curLabel = `${formatCompact(cur)} EXP`;
-      targetLabel = `${formatCompact(target)} EXP (+${g.targetPct}%)`;
+      targetLabel = `${formatCompact(target)} EXP (+${g.targetPct ?? 0}%)`;
       if (rates.xph && rates.xph > 0) remMins = (Math.max(0, target - cur) / rates.xph) * 60;
     } else if (g.type === "time") {
       cur = Math.max(0, effectiveActiveMs || 0);
@@ -239,28 +284,40 @@ export function evaluateSprintProgress(sprint, state, effectiveActiveMs, rates =
       ? Math.max(...subGoals.map((g) => g.pct))
       : subGoals.reduce((acc, g) => acc + g.pct, 0) / subGoals.length;
 
-  const validMins = subGoals.map((g) => g.remMins).filter((m) => typeof m === "number" && Number.isFinite(m));
+  /** @type {number[]} */
+  const validMins = [];
+  for (const g of subGoals) {
+    if (typeof g.remMins === "number" && Number.isFinite(g.remMins)) validMins.push(g.remMins);
+  }
   let etaLabel = "ETA —";
   if (completed) {
     etaLabel = "Target Complete!";
   } else if (validMins.length > 0) {
     const mins = sprint.compound === "any" ? Math.min(...validMins) : Math.max(...validMins);
-    etaLabel = mins < 1 ? "ETA < 1m" : mins < 60 ? `ETA ${Math.ceil(mins)}m` : `ETA ${Math.floor(mins / 60)}h ${Math.round(mins % 60)}m`;
+    etaLabel =
+      mins < 1
+        ? "ETA < 1m"
+        : mins < 60
+        ? `ETA ${Math.ceil(mins)}m`
+        : `ETA ${Math.floor(mins / 60)}h ${Math.round(mins % 60)}m`;
   }
 
   return {
     pct,
     completed,
     etaLabel,
-    summaryLabel: subGoals.map((g) => `${g.curLabel} / ${g.targetLabel}`).join(sprint.compound === "any" ? " · OR · " : " · "),
+    summaryLabel: subGoals
+      .map((g) => `${g.curLabel} / ${g.targetLabel}`)
+      .join(sprint.compound === "any" ? " · OR · " : " · "),
     subGoals,
   };
 }
 
 /**
  * Measurable Challenge Library — strictly packet-trackable metrics (zero manual checkboxes).
- * @param {number} level
- * @param {{ mobId?: number | null, mobName?: string | null }} [ctx]
+ * @param {number} [level]
+ * @param {import("./types.js").ChallengeMobContext} [ctx]
+ * @returns {import("./types.js").ChallengeTemplate[]}
  */
 export function buildChallengeLibrary(level = 25, ctx = {}) {
   const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(level) || 25));
@@ -270,44 +327,70 @@ export function buildChallengeLibrary(level = 25, ctx = {}) {
   const mobName = ctx.mobName || null;
   const mobId = ctx.mobId ?? null;
 
-  return [
+  /** @type {import("./types.js").ChallengeTemplate[]} */
+  const list = [
     { id: "ch_exp_3", category: "EXP", title: "Gain +3% EXP", metric: "exp", target: exp3, unit: "EXP" },
     { id: "ch_exp_5", category: "EXP", title: "Gain +5% EXP", metric: "exp", target: exp5, unit: "EXP" },
     { id: "ch_kills_100", category: "Combat", title: "Slay 100 monsters", metric: "kills", target: 100, unit: "kills" },
     { id: "ch_kills_250", category: "Combat", title: "Slay 250 monsters", metric: "kills", target: 250, unit: "kills" },
-    ...(mobId != null && mobName
-      ? [{ id: `ch_mob_${mobId}`, category: "Combat", title: `Hunt 75× ${mobName}`, metric: "mob_kills", mobId, target: 75, unit: "kills" }]
-      : []),
+  ];
+  if (mobId != null && mobName) {
+    list.push({
+      id: `ch_mob_${mobId}`,
+      category: "Combat",
+      title: `Hunt 75× ${mobName}`,
+      metric: "mob_kills",
+      mobId,
+      target: 75,
+      unit: "kills",
+    });
+  }
+  list.push(
     { id: "ch_mesos_25k", category: "Economy", title: "Earn 25,000 mesos (incl. NPC)", metric: "mesos", target: 25_000, unit: "mesos" },
     { id: "ch_mesos_75k", category: "Economy", title: "Earn 75,000 mesos (incl. NPC)", metric: "mesos", target: 75_000, unit: "mesos" },
     { id: "ch_drops_30", category: "Loot", title: "Collect 30 item drops", metric: "drops", target: 30, unit: "drops" },
     { id: "ch_explore_2", category: "Exploration", title: "Train across 2 hunting maps", metric: "maps", target: 2, unit: "maps" },
     { id: "ch_time_20", category: "Consistency", title: "20 min active grinding", metric: "active_mins", target: 20, unit: "min" },
     { id: "ch_sprints_3", category: "Consistency", title: "Complete 3 sprints this week", metric: "weekly_sprints", target: 3, unit: "sprints" },
-    { id: "ch_special_1", category: "Special", title: "Gain 150 kills + 20 drops", metric: "kills_and_drops", target: 150, secondaryTarget: 20, unit: "kills" },
-  ];
+    { id: "ch_special_1", category: "Special", title: "Gain 150 kills + 20 drops", metric: "kills_and_drops", target: 150, secondaryTarget: 20, unit: "kills" }
+  );
+  return list;
+}
+
+/**
+ * Wraps a challenge template into an active tracked challenge.
+ * @param {import("./types.js").ChallengeTemplate} tpl
+ * @returns {import("./types.js").ActiveChallenge}
+ */
+function activateChallenge(tpl) {
+  return { ...tpl, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] };
 }
 
 /**
  * Generates an initial balanced set of 3 active challenges.
- * @param {number} level
- * @param {{ mobId?: number | null, mobName?: string | null }} [ctx]
+ * @param {number} [level]
+ * @param {import("./types.js").ChallengeMobContext} [ctx]
+ * @returns {import("./types.js").ActiveChallenge[]}
  */
 export function createDefaultChallenges(level = 25, ctx = {}) {
   const lib = buildChallengeLibrary(level, ctx);
   const picks = ["ch_exp_5", "ch_kills_100", "ch_mesos_25k"];
-  return picks
-    .map((id) => lib.find((c) => c.id === id))
-    .filter(Boolean)
-    .map((c) => ({ ...c, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] }));
+  /** @type {import("./types.js").ActiveChallenge[]} */
+  const out = [];
+  for (const id of picks) {
+    const found = lib.find((c) => c.id === id);
+    if (found) out.push(activateChallenge(found));
+  }
+  return out;
 }
 
 /**
  * Replaces one challenge slot with an unused candidate from the library.
- * @param {Array<any>} active
+ * @param {import("./types.js").ActiveChallenge[]} active
  * @param {string} replaceId
- * @param {number} level
- * @param {{ mobId?: number | null, mobName?: string | null }} [ctx]
+ * @param {number} [level]
+ * @param {import("./types.js").ChallengeMobContext} [ctx]
+ * @returns {import("./types.js").ActiveChallenge[]}
  */
 export function rerollChallenge(active, replaceId, level = 25, ctx = {}) {
   const lib = buildChallengeLibrary(level, ctx);
@@ -315,22 +398,19 @@ export function rerollChallenge(active, replaceId, level = 25, ctx = {}) {
   const pool = lib.filter((c) => !usedIds.has(c.id));
   if (pool.length === 0) return active;
   const next = pool[Math.floor(Math.random() * pool.length)];
-  return active.map((c) =>
-    c.id === replaceId
-      ? { ...next, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] }
-      : c
-  );
+  return active.map((c) => (c.id === replaceId ? activateChallenge(next) : c));
 }
 
 /**
  * Synchronizes active challenge progress from current sprint state & returns newly completed challenges.
- * @param {Array<any>} challenges
- * @param {any} state
+ * @param {import("./types.js").ActiveChallenge[]} challenges
+ * @param {Partial<import("./types.js").SessionState>} state
  * @param {number} effectiveActiveMs
- * @param {number} weeklySprintsCompleted
+ * @param {number} [weeklySprintsCompleted]
+ * @returns {import("./types.js").ActiveChallenge[]}
  */
 export function syncChallengesWithState(challenges, state, effectiveActiveMs, weeklySprintsCompleted = 0) {
-  /** @type {Array<any>} */
+  /** @type {import("./types.js").ActiveChallenge[]} */
   const newlyCompleted = [];
   const mapsWithKills = new Set(
     (state.mapSplits || []).filter((s) => (s.kills || 0) > 0 && s.map_id != null).map((s) => s.map_id)
@@ -341,7 +421,7 @@ export function syncChallengesWithState(challenges, state, effectiveActiveMs, we
     if (ch.completed) continue;
     if (ch.metric === "exp") ch.progress = Math.max(0, state.sessionExp || 0);
     else if (ch.metric === "kills") ch.progress = Math.max(0, state.kills || 0);
-    else if (ch.metric === "mob_kills") ch.progress = Number(state.killsByMob?.[ch.mobId]?.count || 0);
+    else if (ch.metric === "mob_kills") ch.progress = ch.mobId != null ? Number(state.killsByMob?.[ch.mobId]?.count || 0) : 0;
     else if (ch.metric === "mesos") ch.progress = Math.max(0, (state.mesos || 0) + (state.npcLootValue || 0));
     else if (ch.metric === "drops") ch.progress = Math.max(0, state.drops || 0);
     else if (ch.metric === "maps") ch.progress = mapsWithKills.size;
@@ -366,7 +446,10 @@ export function syncChallengesWithState(challenges, state, effectiveActiveMs, we
   return newlyCompleted;
 }
 
-/** @param {any} ch */
+/**
+ * @param {import("./types.js").ActiveChallenge} ch
+ * @returns {number}
+ */
 export function challengeProgressPct(ch) {
   if (ch.completed) return 100;
   if (ch.metric === "kills_and_drops") {
@@ -377,7 +460,10 @@ export function challengeProgressPct(ch) {
   return Math.min(100, Math.max(0, (ch.progress / Math.max(1, ch.target)) * 100));
 }
 
-/** @param {any} ch */
+/**
+ * @param {import("./types.js").ActiveChallenge} ch
+ * @returns {string}
+ */
 export function challengeProgressText(ch) {
   if (ch.metric === "kills_and_drops") {
     return `${ch.progress}/${ch.target} kills · ${ch.secondaryProgress || 0}/${ch.secondaryTarget || 0} drops`;
@@ -389,7 +475,8 @@ export function challengeProgressText(ch) {
 
 /**
  * Renders the compact Active Challenges widget inside Live HUD.
- * @param {Array<any>} challenges
+ * @param {import("./types.js").ActiveChallenge[]} challenges
+ * @returns {string}
  */
 export function renderHudChallengesHtml(challenges) {
   if (!challenges || challenges.length === 0) {
@@ -411,9 +498,10 @@ export function renderHudChallengesHtml(challenges) {
 
 /**
  * Renders the Challenges tab Active Board and Filterable Library.
- * @param {Array<any>} active
- * @param {Array<any>} library
- * @param {string} categoryFilter
+ * @param {import("./types.js").ActiveChallenge[]} active
+ * @param {import("./types.js").ChallengeTemplate[]} library
+ * @param {string} [categoryFilter]
+ * @returns {{ activeHtml: string, libHtml: string }}
  */
 export function renderChallengesTabHtml(active, library, categoryFilter = "All") {
   const activeIds = new Set(active.map((c) => c.id));
@@ -452,4 +540,174 @@ export function renderChallengesTabHtml(active, library, categoryFilter = "All")
     .join("");
 
   return { activeHtml, libHtml };
+}
+
+/**
+ * Owns Target Sprint persistence, Sprint History, Active Challenges board, and Planned Map context.
+ * Pure Model/Store — zero DOM dependencies so it can be unit-tested in Node.
+ */
+export class SprintStore {
+  /**
+   * @param {{
+   *   storage?: import("./types.js").StorageLike | null,
+   *   keys?: { activeSprint: string, challenges: string, sprintHistory: string },
+   *   initialLevel?: number,
+   * }} [opts]
+   */
+  constructor(opts = {}) {
+    /** @type {import("./types.js").StorageLike | null} */
+    this.storage = opts.storage ?? null;
+    this.keys = opts.keys ?? {
+      activeSprint: "ms_active_sprint_v1",
+      challenges: "ms_challenges_v1",
+      sprintHistory: "ms_sprint_history_v1",
+    };
+
+    /** @type {import("./types.js").TargetSprint | null} */
+    this.activeSprint = loadJson(this.storage, this.keys.activeSprint, null);
+
+    const savedHist = loadJson(this.storage, this.keys.sprintHistory, /** @type {import("./types.js").SprintHistoryEntry[]} */ ([]));
+    /** @type {import("./types.js").SprintHistoryEntry[]} */
+    this.sprintHistory = Array.isArray(savedHist) ? savedHist : [];
+
+    const savedCh = loadJson(this.storage, this.keys.challenges, /** @type {import("./types.js").ActiveChallenge[] | null} */ (null));
+    /** @type {import("./types.js").ActiveChallenge[]} */
+    this.activeChallenges =
+      Array.isArray(savedCh) && savedCh.length > 0
+        ? savedCh.slice(0, SPRINT_CONFIG.maxActiveChallenges)
+        : createDefaultChallenges(opts.initialLevel ?? 25);
+
+    /** @type {import("./types.js").PlannedMapContext | null} */
+    this.plannedMapContext = null;
+  }
+
+  /** @param {number} [now] */
+  getWeeklySprintCount(now = Date.now()) {
+    const cutoff = now - SPRINT_CONFIG.weekMs;
+    return this.sprintHistory.filter((s) => (s.completedAt || 0) >= cutoff).length;
+  }
+
+  /** @param {import("./types.js").PlannedMapContext | null} ctx */
+  setPlannedMapContext(ctx) {
+    this.plannedMapContext = ctx;
+  }
+
+  /** @param {import("./types.js").TargetSprint} sprint */
+  startSprint(sprint) {
+    this.activeSprint = sprint;
+    saveJson(this.storage, this.keys.activeSprint, this.activeSprint);
+  }
+
+  clearSprint() {
+    this.activeSprint = null;
+    saveJson(this.storage, this.keys.activeSprint, null);
+  }
+
+  /**
+   * Clears any completed active sprint and resets in-progress sprint-scoped challenge progress.
+   */
+  resetForNewSprint() {
+    if (this.activeSprint?.completed) {
+      this.clearSprint();
+    }
+    for (const ch of this.activeChallenges) {
+      if (!ch.completed && ch.metric !== "weekly_sprints") {
+        ch.progress = 0;
+        ch.secondaryProgress = 0;
+      }
+    }
+    saveJson(this.storage, this.keys.challenges, this.activeChallenges);
+  }
+
+  /**
+   * @param {string} replaceId
+   * @param {number} level
+   * @param {import("./types.js").ChallengeMobContext} [ctx]
+   */
+  rerollSlot(replaceId, level, ctx = {}) {
+    this.activeChallenges = rerollChallenge(this.activeChallenges, replaceId, level, ctx);
+    saveJson(this.storage, this.keys.challenges, this.activeChallenges);
+  }
+
+  /**
+   * @param {number} level
+   * @param {import("./types.js").ChallengeMobContext} [ctx]
+   */
+  rerollAll(level, ctx = {}) {
+    const lib = buildChallengeLibrary(level, ctx);
+    const shuffled = [...lib].sort(() => Math.random() - 0.5);
+    this.activeChallenges = shuffled.slice(0, SPRINT_CONFIG.maxActiveChallenges).map(activateChallenge);
+    saveJson(this.storage, this.keys.challenges, this.activeChallenges);
+  }
+
+  /**
+   * Pins a challenge from the library into the active board (replacing a completed slot first).
+   * @param {string} id
+   * @param {number} level
+   * @param {import("./types.js").ChallengeMobContext} [ctx]
+   * @returns {boolean}
+   */
+  pinChallenge(id, level, ctx = {}) {
+    if (this.activeChallenges.some((c) => c.id === id)) return false;
+    const lib = buildChallengeLibrary(level, ctx);
+    const pick = lib.find((c) => c.id === id);
+    if (!pick) return false;
+    const fresh = activateChallenge(pick);
+    if (this.activeChallenges.length < SPRINT_CONFIG.maxActiveChallenges) {
+      this.activeChallenges.push(fresh);
+    } else {
+      const doneIdx = this.activeChallenges.findIndex((c) => c.completed);
+      this.activeChallenges[doneIdx >= 0 ? doneIdx : this.activeChallenges.length - 1] = fresh;
+    }
+    saveJson(this.storage, this.keys.challenges, this.activeChallenges);
+    return true;
+  }
+
+  /**
+   * Evaluates active sprint and synchronizes challenges against live session state.
+   * @param {Partial<import("./types.js").SessionState>} sessionState
+   * @param {number} effectiveActiveMs
+   * @param {import("./types.js").MeasuredRates} rates
+   * @param {number} [now]
+   * @returns {{
+   *   sprintProgress: import("./types.js").SprintProgress | null,
+   *   sprintJustCompleted: import("./types.js").TargetSprint | null,
+   *   newlyCompletedChallenges: import("./types.js").ActiveChallenge[],
+   * }}
+   */
+  evaluateAndSync(sessionState, effectiveActiveMs, rates, now = Date.now()) {
+    /** @type {import("./types.js").TargetSprint | null} */
+    let sprintJustCompleted = null;
+    const sprintProgress = this.activeSprint
+      ? evaluateSprintProgress(this.activeSprint, sessionState, effectiveActiveMs, rates)
+      : null;
+
+    if (this.activeSprint && sprintProgress?.completed && !this.activeSprint.completed) {
+      this.activeSprint.completed = true;
+      this.activeSprint.completedAt = now;
+      saveJson(this.storage, this.keys.activeSprint, this.activeSprint);
+      this.sprintHistory.unshift({
+        id: this.activeSprint.id,
+        title: this.activeSprint.title,
+        completedAt: now,
+      });
+      if (this.sprintHistory.length > SPRINT_CONFIG.maxHistory) {
+        this.sprintHistory.length = SPRINT_CONFIG.maxHistory;
+      }
+      saveJson(this.storage, this.keys.sprintHistory, this.sprintHistory);
+      sprintJustCompleted = this.activeSprint;
+    }
+
+    const newlyCompletedChallenges = syncChallengesWithState(
+      this.activeChallenges,
+      sessionState,
+      effectiveActiveMs,
+      this.getWeeklySprintCount(now)
+    );
+    if (newlyCompletedChallenges.length > 0) {
+      saveJson(this.storage, this.keys.challenges, this.activeChallenges);
+    }
+
+    return { sprintProgress, sprintJustCompleted, newlyCompletedChallenges };
+  }
 }

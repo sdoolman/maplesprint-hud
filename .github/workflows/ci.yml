@@ -81,9 +81,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Syntax & HUD verification
+      - name: Syntax, Strict TypeScript & HUD verification
         run: |
           for f in web/js/*.js; do node --check "$f"; done
+          npx -y -p typescript@5.7.3 tsc --noEmit
           node --test tests/verify.mjs
 
   deploy-pages:

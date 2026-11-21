@@ -55,6 +55,10 @@ export function recordedRateForMap(splits, mapId) {
 /**
  * Evaluates a map against configurable, bounded 0-100 suitability criteria defined in GUIDE_CONFIG.
  * Uses inverse HP/EXP efficiency (lower is better), spatial surface-area density, and dominant/resistant elemental synergy.
+ * @param {any} mapEntry
+ * @param {number} charLv
+ * @param {string} jobFilter
+ * @param {typeof GUIDE_CONFIG} [cfg]
  */
 export function scoreMap(mapEntry, charLv, jobFilter, cfg = GUIDE_CONFIG) {
   const lvDiff = mapEntry.avgLevel - charLv;
@@ -161,13 +165,22 @@ export function scoreMap(mapEntry, charLv, jobFilter, cfg = GUIDE_CONFIG) {
   };
 }
 
+/**
+ * @param {any} m
+ * @param {number} charLv
+ * @param {string} query
+ */
 function matchesGuideFilter(m, charLv, query) {
   const lvDiff = m.avgLevel - charLv;
   if (!query) return lvDiff >= GUIDE_CONFIG.minLevelDelta && lvDiff <= GUIDE_CONFIG.maxLevelDelta;
-  const hay = `${m.name} ${m.street} ${m.mobs.map((x) => x.name).join(" ")}`.toLowerCase();
+  const hay = `${m.name} ${m.street} ${m.mobs.map((/** @type {any} */ x) => x.name).join(" ")}`.toLowerCase();
   return hay.includes(query);
 }
 
+/**
+ * @param {Array<any>} entries
+ * @param {string} sortBy
+ */
 function sortGuideEntries(entries, sortBy) {
   entries.sort((a, b) => {
     if (sortBy === "recorded") return b.recordedXph - a.recordedXph || b.score - a.score;
@@ -178,6 +191,7 @@ function sortGuideEntries(entries, sortBy) {
   });
 }
 
+/** @param {any} mob */
 function formatElemBadges(mob) {
   const parts = [];
   if (mob.undead) parts.push(`<span class="el-tag pos">Undead</span>`);
@@ -188,6 +202,7 @@ function formatElemBadges(mob) {
   return parts.length > 0 ? parts.join(" ") : `<span class="muted">—</span>`;
 }
 
+/** @param {Array<any>} mobs */
 function buildMobTableHtml(mobs) {
   const rows = mobs
     .map((mob) => {
@@ -221,6 +236,7 @@ function buildMobTableHtml(mobs) {
   </div>`;
 }
 
+/** @param {any} entry */
 function buildScoreBreakdownHtml(entry) {
   const p = entry.parts;
   const diffStr = entry.lvDiff > 0 ? `+${entry.lvDiff}` : `${entry.lvDiff}`;
@@ -236,6 +252,11 @@ function buildScoreBreakdownHtml(entry) {
   </div>`;
 }
 
+/**
+ * @param {number} mapId
+ * @param {string} safeMapName
+ * @param {boolean} [shortHenesysLabel]
+ */
 function buildMapLinksHtml(mapId, safeMapName, shortHenesysLabel = false) {
   const meowUrl = `${MEOWDB_MAP_BASE}${String(mapId).padStart(9, "0")}`;
   const henesysUrl = `${HENESYS_MAP_BASE}${mapId}`;
@@ -243,12 +264,16 @@ function buildMapLinksHtml(mapId, safeMapName, shortHenesysLabel = false) {
   return `<a class="hs-link" href="${meowUrl}" target="_blank" rel="noopener noreferrer" title="View ${safeMapName} on MeowDB">MeowDB ↗</a> <a class="hs-link" href="${henesysUrl}" target="_blank" rel="noopener noreferrer" title="View ${safeMapName} on Henesys.gg">${henesysLabel}</a>`;
 }
 
+/**
+ * @param {any} entry
+ * @param {number} rankIndex
+ */
 function buildGuideCardHtml(entry, rankIndex) {
   const diffLabel = entry.lvDiff > 0 ? `+${entry.lvDiff}` : `${entry.lvDiff}`;
   const safeName = escapeHtml(entry.name);
   const topTags = (entry.tags || []).slice(0, 2);
   const pillsHtml = topTags
-    .map((t) => `<span class="guide-pill ${t.tone}">${escapeHtml(t.label)}</span>`)
+    .map((/** @type {{ label: string, tone: string }} */ t) => `<span class="guide-pill ${t.tone}">${escapeHtml(t.label)}</span>`)
     .join("");
   const recBadge =
     entry.recordedXph > 0
@@ -314,6 +339,10 @@ export function renderGuideHtml({ loaded, guideMaps, mapSplits, charLv, jobFilte
   return top.map((m, idx) => buildGuideCardHtml(m, idx)).join("");
 }
 
+/**
+ * @param {Record<number, import("./types.js").MobKillTally> | null | undefined} killsByMob
+ * @param {Record<number, { name?: string }> | null | undefined} mobsDb
+ */
 function formatSplitMobsHtml(killsByMob, mobsDb) {
   if (!killsByMob || typeof killsByMob !== "object") return `<span class="muted">—</span>`;
   const entries = Object.entries(killsByMob)

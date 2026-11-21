@@ -3,45 +3,35 @@
 
 import {
   AUTO_PAUSE_IDLE_MS,
-  CLASSIC_EXP_TABLE,
   DEFAULT_DB,
   JOB_NAMES,
   MAX_CLASSIC_LEVEL,
-  ROLLING_WINDOW_MS,
   base64ToBytes,
   eligibleJobsForLevel,
   formatCompact,
   formatDuration,
-  normalizeJobForLevel,
   requireEl,
 } from "./constants.js";
 import { fetchCatalog } from "./catalog.js";
 import { ENDPOINT_CONFIG, EndpointClient, fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "./endpoint.js";
+import { FeedView, ToastView } from "./feed-view.js";
 import { renderGuideHtml, renderSplitsHtml } from "./guide.js";
 import { PipOverlay } from "./pip.js";
+import { SessionModel } from "./session-model.js";
 import {
-  SPRINT_CONFIG,
   SPRINT_TEMPLATES,
+  SprintStore,
   buildChallengeLibrary,
-  createDefaultChallenges,
   createTargetSprint,
   estimateSession,
-  evaluateSprintProgress,
   renderChallengesTabHtml,
   renderHudChallengesHtml,
-  rerollChallenge,
-  syncChallengesWithState,
 } from "./sprints.js";
 
 const HUD_CONFIG = Object.freeze({
   maxFeedItems: 60,
-  maxSplits: 50,
-  killCorrelationMs: 500,
   renderIntervalMs: 1000,
-  minRollingSpanMs: 15_000,
   defaultGuideLevel: 25,
-  msPerHour: 3_600_000,
-  weekMs: 7 * 86_400_000,
 });
 
 const STORAGE_KEYS = Object.freeze({
@@ -58,6 +48,17 @@ const STORAGE_KEYS = Object.freeze({
   sprintHistory: "ms_sprint_history_v1",
 });
 
+/** @type {Record<string, string>} */
+const SPRINT_TYPE_LABELS = {
+  exp_pct: "TARGET VALUE (% EXP)",
+  time: "TARGET MINUTES",
+  kills: "TARGET KILLS",
+  mesos: "TARGET MESOS",
+  drops: "TARGET DROPS",
+  mix: "PRIMARY TIME (MIN)",
+};
+
+// --- DOM Bindings ---
 const endpointInput = /** @type {HTMLInputElement} */ (requireEl("endpointUrl"));
 const connectBtn = /** @type {HTMLButtonElement} */ (requireEl("connectBtn"));
 const dbSourceSelect = /** @type {HTMLSelectElement} */ (requireEl("dbSource"));
@@ -164,6 +165,7 @@ const splitsTableBody = requireEl("splitsTableBody");
 const exportSplitsBtn = requireEl("exportSplitsBtn");
 const clearSplitsBtn = requireEl("clearSplitsBtn");
 
+// --- Models & Views ---
 const params = new URLSearchParams(window.location.search);
 endpointInput.value =
   params.get("endpoint") ||
@@ -172,119 +174,38 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261121b", import.meta.url).href);
+const sessionModel = new SessionModel({
+  storage: localStorage,
+  keys: { level: STORAGE_KEYS.level, job: STORAGE_KEYS.job, splits: STORAGE_KEYS.splits },
+  defaultWgPort: ENDPOINT_CONFIG.defaultWgPort,
+});
+const state = sessionModel.state;
 
-function loadJsonStorage(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
+const sprintStore = new SprintStore({
+  storage: localStorage,
+  keys: {
+    activeSprint: STORAGE_KEYS.activeSprint,
+    challenges: STORAGE_KEYS.challenges,
+    sprintHistory: STORAGE_KEYS.sprintHistory,
+  },
+  initialLevel: state.level,
+});
 
-function saveJsonStorage(key, value) {
-  try {
-    if (value == null) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
+const feedView = new FeedView(feedEl, feedFiltersEl, HUD_CONFIG.maxFeedItems);
+const toastView = new ToastView(toastContainer);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261121c", import.meta.url).href);
 
-function loadSavedSplits() {
-  const parsed = loadJsonStorage(STORAGE_KEYS.splits, []);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-function saveSplits() {
-  saveJsonStorage(STORAGE_KEYS.splits, state.mapSplits.slice(0, HUD_CONFIG.maxSplits));
-}
-
+/** @type {import("./types.js").CatalogData} */
 const db = {
-  /** @type {Record<number, any>} */ maps: {},
-  /** @type {Record<number, any>} */ mobs: {},
-  /** @type {Record<number, any>} */ items: {},
+  maps: {},
+  mobs: {},
+  items: {},
   loaded: false,
-  /** @type {Array<any>} */ guideMaps: [],
+  guideMaps: [],
 };
 
-function createSessionState(savedLevel, savedJob, savedSplits) {
-  const level = Math.min(MAX_CLASSIC_LEVEL, Math.max(1, Number(savedLevel) || 1));
-  return {
-    startTs: /** @type {number | null} */ (null),
-    activeMs: 0,
-    lastActiveTs: /** @type {number | null} */ (null),
-    sessionExp: 0,
-    lastExp: 0,
-    totalExp: 0,
-    level,
-    job: normalizeJobForLevel(Number(savedJob) || 0, level),
-    kills: 0,
-    /** @type {Record<number, { count: number, exp: number }>} */ killsByMob: {},
-    lastMobId: /** @type {number | null} */ (null),
-    mesos: 0,
-    npcLootValue: 0,
-    drops: 0,
-    /** @type {Record<number, number>} */ dropsByItem: {},
-    lastItemId: /** @type {number | null} */ (null),
-    hp: /** @type {number | null} */ (null),
-    mp: /** @type {number | null} */ (null),
-    maxHp: /** @type {number | null} */ (null),
-    maxMp: /** @type {number | null} */ (null),
-    damageTaken: 0,
-    damageDealt: 0,
-    mapId: /** @type {number | null} */ (null),
-    ch: /** @type {number | null} */ (null),
-    events: 0,
-    rawChunksReceived: 0,
-    observedWgPort: ENDPOINT_CONFIG.defaultWgPort,
-    /** @type {Array<{ ts: number, gain: number }>} */ expWindow: [],
-    mapSplits: savedSplits,
-    currentSplit: /** @type {any | null} */ (null),
-  };
-}
-
-const state = createSessionState(
-  localStorage.getItem(STORAGE_KEYS.level),
-  localStorage.getItem(STORAGE_KEYS.job),
-  loadSavedSplits()
-);
-
-/** @type {any | null} */
-let activeSprint = loadJsonStorage(STORAGE_KEYS.activeSprint, null);
-/** @type {Array<{ id: string, title: string, completedAt: number }>} */
-let sprintHistory = (() => {
-  const saved = loadJsonStorage(STORAGE_KEYS.sprintHistory, []);
-  return Array.isArray(saved) ? saved : [];
-})();
-/** @type {Array<any>} */
-let activeChallenges = (() => {
-  const saved = loadJsonStorage(STORAGE_KEYS.challenges, null);
-  if (Array.isArray(saved) && saved.length > 0) return saved.slice(0, SPRINT_CONFIG.maxActiveChallenges);
-  return createDefaultChallenges(state.level);
-})();
-/** @type {{ mapId: number, name: string, mobs: Array<any> } | null} */
-let plannedMapContext = null;
-let activeFeedCategory = "all";
-
-function getWeeklySprintCount() {
-  const cutoff = Date.now() - HUD_CONFIG.weekMs;
-  return sprintHistory.filter((s) => (s.completedAt || 0) >= cutoff).length;
-}
-
-function showToast(title, body) {
-  const el = document.createElement("div");
-  el.className = "toast";
-  const strong = document.createElement("strong");
-  strong.textContent = title;
-  const span = document.createElement("span");
-  span.textContent = body;
-  el.append(strong, span);
-  toastContainer.append(el);
-  window.setTimeout(() => {
-    el.remove();
-  }, 4500);
-}
-
+// --- Character Level & Job Controls ---
+/** @param {number} jobId */
 function guideFilterForJob(jobId) {
   const id = Number(jobId) || 0;
   if (id >= 230 && id <= 232) return "cleric";
@@ -296,6 +217,7 @@ function guideFilterForJob(jobId) {
   return "all";
 }
 
+/** @param {number} [level] */
 function populateJobSelect(level = state.level) {
   charJobEl.replaceChildren();
   for (const [id, name] of eligibleJobsForLevel(level)) {
@@ -306,6 +228,7 @@ function populateJobSelect(level = state.level) {
   }
 }
 
+/** @param {number} jobId */
 function setJobSelectValue(jobId) {
   const val = String(Number(jobId) || 0);
   if (![...charJobEl.options].some((o) => o.value === val)) {
@@ -318,20 +241,16 @@ function setJobSelectValue(jobId) {
   charJobEl.value = val;
 }
 
-function setCharacterProgression(level, job) {
-  const prevLevel = state.level;
-  if (level != null && level >= 1 && level <= MAX_CLASSIC_LEVEL) {
-    state.level = level;
-    manualLevelInput.value = String(level);
-    guideLevelInput.value = String(level);
-    localStorage.setItem(STORAGE_KEYS.level, String(level));
-  }
-  const rawJob = job != null ? Number(job) : state.job;
-  const validJob = normalizeJobForLevel(rawJob, state.level);
-  if (state.level !== prevLevel) populateJobSelect(state.level);
-  if (job != null || validJob !== state.job) {
-    state.job = validJob;
-    localStorage.setItem(STORAGE_KEYS.job, String(state.job));
+/**
+ * @param {number | null | undefined} level
+ * @param {number | null | undefined} job
+ */
+function syncCharacterProgressionUI(level, job) {
+  const { levelChanged } = sessionModel.setCharacterProgression(level, job);
+  if (levelChanged) {
+    manualLevelInput.value = String(state.level);
+    guideLevelInput.value = String(state.level);
+    populateJobSelect(state.level);
   }
   setJobSelectValue(state.job);
 }
@@ -341,9 +260,10 @@ setJobSelectValue(state.job);
 manualLevelInput.value = String(state.level);
 guideLevelInput.value = String(state.level > 1 ? state.level : HUD_CONFIG.defaultGuideLevel);
 
+// --- Codec & Local Relay Endpoint ---
 const codecEngine = {
   ready: false,
-  /** @type {any} */
+  /** @type {{ feedChunk: (flow: string, seq: number, data: Uint8Array) => import("./types.js").TelemetryEvent[], reset?: () => void } | null} */
   decoder: null,
 };
 
@@ -372,10 +292,14 @@ async function initCodec() {
       // Try next candidate
     }
   }
-
   wasmNodeDetail.textContent = "Standby";
 }
 
+/**
+ * @param {string} flow
+ * @param {number} seq
+ * @param {string} b64Data
+ */
 function ingestRawChunk(flow, seq, b64Data) {
   if (!codecEngine.ready || !codecEngine.decoder || !b64Data) return;
   const payload = base64ToBytes(b64Data);
@@ -394,9 +318,10 @@ function ingestRawChunk(flow, seq, b64Data) {
   }
 }
 
+/** @param {Awaited<ReturnType<typeof probeEndpoint>>} result */
 function applyEndpointProbeUI(result) {
   if (result.invalid) {
-    endpointStatusBadge.textContent = result.error;
+    endpointStatusBadge.textContent = result.error || "Invalid URL";
     endpointStatusBadge.classList.remove("online");
     connectBtn.disabled = true;
     connectBtn.textContent = "Invalid URL";
@@ -514,116 +439,13 @@ async function loadCatalog() {
   }
 }
 
-function applyFeedFilter(cat) {
-  activeFeedCategory = cat || "all";
-  for (const btn of feedFiltersEl.querySelectorAll("[data-feed-cat]")) {
-    btn.classList.toggle("active", btn.getAttribute("data-feed-cat") === activeFeedCategory);
-  }
-  for (const li of feedEl.children) {
-    const itemCat = li.getAttribute("data-cat") || "general";
-    li.classList.toggle("hidden", activeFeedCategory !== "all" && itemCat !== activeFeedCategory);
-  }
-}
-
-function addFeed(text, category = "general", major = false) {
-  const li = document.createElement("li");
-  li.dataset.cat = category;
-  if (major) li.classList.add("major");
-  if (activeFeedCategory !== "all" && category !== activeFeedCategory) {
-    li.classList.add("hidden");
-  }
-  const msgSpan = document.createElement("span");
-  msgSpan.textContent = text;
-  const tsSpan = document.createElement("span");
-  tsSpan.className = "ts";
-  tsSpan.textContent = new Date().toLocaleTimeString();
-  li.append(msgSpan, tsSpan);
-  feedEl.prepend(li);
-  while (feedEl.children.length > HUD_CONFIG.maxFeedItems && feedEl.lastChild) {
-    feedEl.lastChild.remove();
-  }
-}
-
-function recordActiveTime(ts) {
-  const now = ts || Date.now();
-  if (!state.startTs) state.startTs = now;
-  if (state.lastActiveTs !== null) {
-    const delta = now - state.lastActiveTs;
-    if (delta > 0 && delta <= AUTO_PAUSE_IDLE_MS) {
-      state.activeMs += delta;
-      if (state.currentSplit) state.currentSplit.active_ms += delta;
-    }
-  }
-  state.lastActiveTs = now;
-}
-
-function ensureCurrentSplit(mapId, channel, ts) {
-  if (mapId == null) return null;
-  if (state.currentSplit && state.currentSplit.map_id === mapId) {
-    if (channel != null) state.currentSplit.channel = channel;
-    return state.currentSplit;
-  }
-  const split = {
-    map_id: mapId,
-    channel: channel ?? state.ch ?? null,
-    started_ts: ts || Date.now(),
-    active_ms: 0,
-    exp_gained: 0,
-    kills: 0,
-    mesos_gained: 0,
-    drops: 0,
-  };
-  state.currentSplit = split;
-  state.mapSplits.unshift(split);
-  if (state.mapSplits.length > HUD_CONFIG.maxSplits) state.mapSplits.length = HUD_CONFIG.maxSplits;
-  saveSplits();
-  return split;
-}
-
-function computeRolling5mXph(now) {
-  const cutoff = now - ROLLING_WINDOW_MS;
-  while (state.expWindow.length > 0 && state.expWindow[0].ts < cutoff) {
-    state.expWindow.shift();
-  }
-  if (state.expWindow.length === 0) return 0;
-  let sum = 0;
-  for (const item of state.expWindow) sum += item.gain;
-  const spanMs = Math.max(HUD_CONFIG.minRollingSpanMs, Math.min(ROLLING_WINDOW_MS, now - state.expWindow[0].ts));
-  return Math.round((sum * HUD_CONFIG.msPerHour) / spanMs);
-}
-
-function computeLevelProgress(rateForEta) {
-  const reqExp = CLASSIC_EXP_TABLE[state.level] || 0;
-  if (state.level >= MAX_CLASSIC_LEVEL || reqExp <= 0) {
-    return { pct: 100, pctLabel: "MAX", etaLabel: "Lv. Cap", expDetail: "Max Level" };
-  }
-  let pct = 0;
-  let expDetail = `— / ${reqExp.toLocaleString()} EXP`;
-  if (state.totalExp > 0) {
-    const cur = Math.min(reqExp, state.totalExp);
-    const rem = Math.max(0, reqExp - cur);
-    pct = Math.min(99.99, Math.max(0, (cur / reqExp) * 100));
-    expDetail = `${cur.toLocaleString()} / ${reqExp.toLocaleString()} (${rem.toLocaleString()} to Lv.${state.level + 1})`;
-  } else if (state.sessionExp > 0) {
-    const cur = state.sessionExp % reqExp;
-    const rem = Math.max(0, reqExp - cur);
-    pct = Math.min(99.99, Math.max(0, (cur / reqExp) * 100));
-    expDetail = `~${rem.toLocaleString()} to Lv.${state.level + 1}`;
-  }
-  if (rateForEta <= 0) {
-    return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel: "ETA —", expDetail };
-  }
-  const curInLevel = state.totalExp > 0 ? Math.min(reqExp, state.totalExp) : state.sessionExp % reqExp;
-  const minsLeft = (Math.max(0, reqExp - curInLevel) / rateForEta) * 60;
-  const etaLabel =
-    minsLeft < 1
-      ? "ETA < 1m"
-      : minsLeft < 60
-      ? `ETA ${Math.ceil(minsLeft)}m`
-      : `ETA ${Math.floor(minsLeft / 60)}h ${Math.round(minsLeft % 60)}m`;
-  return { pct, pctLabel: `${pct.toFixed(2)}%`, etaLabel, expDetail };
-}
-
+// --- HUD View Renderers ---
+/**
+ * @template T
+ * @param {HTMLElement} container
+ * @param {T[]} entries
+ * @param {(entry: T) => string} formatEntry
+ */
 function renderBreakdownChips(container, entries, formatEntry) {
   container.replaceChildren();
   for (const entry of entries.slice(0, 4)) {
@@ -634,6 +456,7 @@ function renderBreakdownChips(container, entries, formatEntry) {
   }
 }
 
+/** @param {number} activeSec */
 function renderCombatAndVitals(activeSec) {
   killsEl.textContent = String(state.kills);
   if (state.lastMobId !== null) {
@@ -667,6 +490,7 @@ function renderCombatAndVitals(activeSec) {
     state.mp !== null ? (state.maxMp ? `${state.mp.toLocaleString()}/${state.maxMp.toLocaleString()}` : String(state.mp)) : "--";
 }
 
+/** @param {number} activeSec */
 function renderInventory(activeSec) {
   const netMesos = state.mesos + state.npcLootValue;
   mesosEl.textContent = netMesos.toLocaleString();
@@ -691,20 +515,10 @@ function renderInventory(activeSec) {
   });
 }
 
-function currentMeasuredRates(effectiveActiveMs) {
-  const activeSec = Math.max((effectiveActiveMs || state.activeMs || 0) / 1000, 1);
-  if (!state.startTs || effectiveActiveMs < 15_000) return {};
-  const rolling5m = computeRolling5mXph(Date.now());
-  const xph = rolling5m > 0 ? rolling5m : Math.max(0, Math.floor((state.sessionExp * 3600) / activeSec));
-  const kpm = (state.kills * 60) / activeSec;
-  const mph = ((state.mesos + state.npcLootValue) * 3600) / activeSec;
-  const dpm = (state.drops * 60) / activeSec;
-  return { xph, kpm, mph, dpm };
-}
-
+/** @returns {import("./types.js").ChallengeMobContext} */
 function getChallengeMobContext() {
-  if (plannedMapContext?.mobs?.length) {
-    const top = plannedMapContext.mobs[0];
+  if (sprintStore.plannedMapContext?.mobs?.length) {
+    const top = sprintStore.plannedMapContext.mobs[0];
     return { mobId: top.id ?? null, mobName: top.name ?? null };
   }
   if (state.lastMobId != null && db.mobs[state.lastMobId]) {
@@ -715,12 +529,12 @@ function getChallengeMobContext() {
 
 function renderChallenges() {
   const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
-  const weeklyCount = getWeeklySprintCount();
+  const weeklyCount = sprintStore.getWeeklySprintCount();
   weeklySprintsTag.textContent = `${weeklyCount} sprint${weeklyCount === 1 ? "" : "s"} this week`;
-  hudChallengesList.innerHTML = renderHudChallengesHtml(activeChallenges);
+  hudChallengesList.innerHTML = renderHudChallengesHtml(sprintStore.activeChallenges);
   if (!viewChallenges.classList.contains("hidden")) {
     const { activeHtml, libHtml } = renderChallengesTabHtml(
-      activeChallenges,
+      sprintStore.activeChallenges,
       lib,
       challengeCategoryFilter.value || "All"
     );
@@ -729,32 +543,29 @@ function renderChallenges() {
   }
 }
 
+/**
+ * @param {number} effectiveActiveMs
+ * @param {import("./types.js").MeasuredRates} rates
+ */
 function renderActiveSprintAndChallenges(effectiveActiveMs, rates) {
-  if (activeSprint) {
-    const prog = evaluateSprintProgress(activeSprint, state, effectiveActiveMs, rates);
-    if (prog) {
-      const mapSuffix = activeSprint.mapName ? ` @ ${activeSprint.mapName}` : "";
-      hudSprintTitle.textContent = `${activeSprint.title}${mapSuffix}`;
-      hudSprintDetail.textContent = prog.summaryLabel;
-      hudSprintEta.textContent = prog.etaLabel;
-      hudSprintTrack.classList.remove("hidden");
-      hudClearSprintBtn.classList.remove("hidden");
-      hudSprintBar.style.width = `${prog.pct.toFixed(1)}%`;
-      hudSprintBar.classList.toggle("done", prog.completed);
-      if (prog.completed && !activeSprint.completed) {
-        activeSprint.completed = true;
-        activeSprint.completedAt = Date.now();
-        saveJsonStorage(STORAGE_KEYS.activeSprint, activeSprint);
-        sprintHistory.unshift({
-          id: activeSprint.id,
-          title: activeSprint.title,
-          completedAt: activeSprint.completedAt,
-        });
-        if (sprintHistory.length > 50) sprintHistory.length = 50;
-        saveJsonStorage(STORAGE_KEYS.sprintHistory, sprintHistory);
-        showToast("🎯 Sprint Complete!", `${activeSprint.title}${mapSuffix}`);
-        addFeed(`Sprint Complete: ${activeSprint.title}${mapSuffix}`, "challenges", true);
-      }
+  const { sprintProgress, sprintJustCompleted, newlyCompletedChallenges } = sprintStore.evaluateAndSync(
+    state,
+    effectiveActiveMs,
+    rates
+  );
+
+  if (sprintStore.activeSprint && sprintProgress) {
+    const mapSuffix = sprintStore.activeSprint.mapName ? ` @ ${sprintStore.activeSprint.mapName}` : "";
+    hudSprintTitle.textContent = `${sprintStore.activeSprint.title}${mapSuffix}`;
+    hudSprintDetail.textContent = sprintProgress.summaryLabel;
+    hudSprintEta.textContent = sprintProgress.etaLabel;
+    hudSprintTrack.classList.remove("hidden");
+    hudClearSprintBtn.classList.remove("hidden");
+    hudSprintBar.style.width = `${sprintProgress.pct.toFixed(1)}%`;
+    hudSprintBar.classList.toggle("done", sprintProgress.completed);
+    if (sprintJustCompleted) {
+      toastView.show("🎯 Sprint Complete!", `${sprintJustCompleted.title}${mapSuffix}`);
+      feedView.add(`Sprint Complete: ${sprintJustCompleted.title}${mapSuffix}`, "challenges", true);
     }
   } else {
     hudSprintTitle.textContent = "No target active";
@@ -766,13 +577,9 @@ function renderActiveSprintAndChallenges(effectiveActiveMs, rates) {
     hudSprintBar.classList.remove("done");
   }
 
-  const newlyDone = syncChallengesWithState(activeChallenges, state, effectiveActiveMs, getWeeklySprintCount());
-  if (newlyDone.length > 0) {
-    saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
-    for (const ch of newlyDone) {
-      showToast("🏆 Challenge Complete!", ch.title);
-      addFeed(`Challenge Complete: ${ch.title}`, "challenges", true);
-    }
+  for (const ch of newlyCompletedChallenges) {
+    toastView.show("🏆 Challenge Complete!", ch.title);
+    feedView.add(`Challenge Complete: ${ch.title}`, "challenges", true);
   }
   renderChallenges();
 }
@@ -800,7 +607,7 @@ function render() {
     state.lastExp < 0 ? `${state.lastExp.toLocaleString()} (Death loss)` : `+${state.lastExp.toLocaleString()} last gain`;
 
   const xphVal = state.startTs ? Math.max(0, Math.floor((state.sessionExp * 3600) / activeSec)) : 0;
-  const rolling5m = computeRolling5mXph(now);
+  const rolling5m = sessionModel.computeRolling5mXph(now);
   xphEl.textContent = xphVal.toLocaleString();
   xph5mEl.textContent = `5m: ${formatCompact(rolling5m)}/h`;
   elapsedEl.textContent = `${formatDuration(effectiveActiveMs)} active`;
@@ -809,7 +616,7 @@ function render() {
   renderInventory(activeSec);
 
   setJobSelectValue(state.job);
-  const prog = computeLevelProgress(rolling5m > 0 ? rolling5m : xphVal);
+  const prog = sessionModel.computeLevelProgress(rolling5m > 0 ? rolling5m : xphVal);
   levelExpDetailEl.textContent = prog.expDetail;
   levelPctEl.textContent = prog.pctLabel;
   levelProgressBar.style.width = `${prog.pct.toFixed(2)}%`;
@@ -854,135 +661,56 @@ function render() {
   });
 }
 
-/** @type {number | null} */ let pendingKillMobId = null;
-/** @type {number | null} */ let pendingKillTimer = null;
-
-function clearPendingKill() {
-  pendingKillMobId = null;
-  if (pendingKillTimer !== null) {
-    clearTimeout(pendingKillTimer);
-    pendingKillTimer = null;
+// --- Event Ingestion ---
+/** @param {import("./types.js").TelemetryEvent} ev */
+function handleEvent(ev) {
+  const res = sessionModel.applyEvent(ev, db);
+  if (res.levelChanged) {
+    manualLevelInput.value = String(state.level);
+    guideLevelInput.value = String(state.level);
+    populateJobSelect(state.level);
   }
+  if (res.levelChanged || res.jobChanged) setJobSelectValue(state.job);
+  if (res.mpDeltaText) mpSubEl.textContent = res.mpDeltaText;
+  for (const item of res.feed) feedView.add(item.text, item.category, Boolean(item.major));
+  if (res.splitUpdated && !viewHistory.classList.contains("hidden")) renderSplitsTable();
 }
 
-/** @type {Record<string, (ev: any, evTs: number) => void>} */
-const EVENT_HANDLERS = {
-  exp_gain(ev, evTs) {
-    recordActiveTime(evTs);
-    const mobId = typeof ev.mob_id === "number" ? ev.mob_id : pendingKillMobId;
-    if (ev.gain > 0 && mobId !== null) {
-      const mob = db.mobs[mobId];
-      state.lastMobId = mobId;
-      if (mob && mob.hp > 0) {
-        const dmg =
-          ev.self_kill === true || !mob.exp
-            ? mob.hp
-            : Math.round(mob.hp * Math.min(1, ev.gain / mob.exp));
-        state.damageDealt += Math.max(0, dmg);
-      }
-      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${mobId}`}`, "kills");
-      clearPendingKill();
+/** @param {string} rawJson */
+function handleServerMessage(rawJson) {
+  /** @type {any} */
+  let msg;
+  try {
+    msg = JSON.parse(rawJson);
+  } catch {
+    return;
+  }
+  if (msg.type === "raw_chunk") {
+    ingestRawChunk(String(msg.flow || "default"), Number(msg.seq) || 0, String(msg.data || ""));
+    return;
+  }
+  if (msg.type === "endpoint_ready") {
+    endpointStatusBadge.textContent = "ONLINE (Connected)";
+    endpointStatusBadge.classList.add("online");
+    return;
+  }
+  if (msg.type === "init" && msg.data) {
+    const res = sessionModel.applyInit(msg.data);
+    if (res.levelChanged) {
+      manualLevelInput.value = String(state.level);
+      guideLevelInput.value = String(state.level);
+      populateJobSelect(state.level);
     }
-    state.sessionExp += ev.gain;
-    state.lastExp = ev.gain;
-    if (typeof ev.total_exp === "number") state.totalExp = ev.total_exp;
-    if (ev.gain > 0) {
-      state.kills += 1;
-      const mobKey = mobId ?? 0;
-      const prev = state.killsByMob[mobKey] || { count: 0, exp: 0 };
-      state.killsByMob[mobKey] = { count: prev.count + 1, exp: prev.exp + ev.gain };
-      state.expWindow.push({ ts: evTs, gain: ev.gain });
-    }
-    const split = ensureCurrentSplit(ev.map_id ?? state.mapId, state.ch, evTs);
-    if (split) {
-      split.exp_gained += ev.gain;
-      if (ev.gain > 0) {
-        split.kills += 1;
-        if (!split.killsByMob) split.killsByMob = {};
-        const mobKey = mobId ?? 0;
-        const sPrev = split.killsByMob[mobKey] || { count: 0, exp: 0 };
-        split.killsByMob[mobKey] = { count: sPrev.count + 1, exp: sPrev.exp + ev.gain };
-      }
-    }
-    saveSplits();
-    addFeed(
-      ev.loss || ev.gain < 0
-        ? `EXP Loss: ${ev.gain.toLocaleString()} EXP (Total: ${(ev.total_exp ?? 0).toLocaleString()})`
-        : `+${ev.gain.toLocaleString()} EXP (Total: ${(ev.total_exp ?? 0).toLocaleString()})`,
-      "exp",
-      Boolean(ev.loss || ev.gain < 0)
-    );
-  },
-  char_stats(ev) {
-    setCharacterProgression(ev.level, ev.job);
-    if (ev.max_hp) state.maxHp = ev.max_hp;
-    if (ev.max_mp) state.maxMp = ev.max_mp;
-    if (typeof ev.total_exp === "number" && ev.total_exp >= 0) state.totalExp = ev.total_exp;
-  },
-  hp_mp(ev, evTs) {
-    if (ev.hp != null) state.hp = ev.hp;
-    if (ev.mp != null) state.mp = ev.mp;
-    if (ev.max_hp) state.maxHp = ev.max_hp;
-    if (ev.max_mp) state.maxMp = ev.max_mp;
-    if (ev.damage_taken || (typeof ev.mp_delta === "number" && ev.mp_delta < 0)) {
-      recordActiveTime(evTs);
-    }
-    if (ev.damage_taken) {
-      state.damageTaken += ev.damage_taken;
-      addFeed(`Took ${ev.damage_taken} dmg (HP ${ev.hp})`, "kills");
-    }
-    if (ev.mp_delta) mpSubEl.textContent = `${ev.mp_delta > 0 ? "+" : ""}${ev.mp_delta} MP`;
-  },
-  map_change(ev, evTs) {
-    state.mapId = ev.map_id;
-    state.ch = ev.channel;
-    ensureCurrentSplit(ev.map_id, ev.channel, evTs);
-    const m = db.maps[ev.map_id];
-    addFeed(`Entered ${m ? m.name : `Map #${ev.map_id}`} (Ch. ${ev.channel})`, "general");
-    renderSplitsTable();
-  },
-  mob_kill(ev) {
-    // Only stage the mob ID for correlation with our own subsequent exp_gain;
-    // map-wide kill events fire for other players' kills on the same map too.
-    clearPendingKill();
-    pendingKillMobId = ev.mob_id;
-    pendingKillTimer = window.setTimeout(clearPendingKill, HUD_CONFIG.killCorrelationMs);
-  },
-  item_loot(ev, evTs) {
-    recordActiveTime(evTs);
-    const qty = ev.qty || 1;
-    state.drops += qty;
-    state.dropsByItem[ev.item_id] = (state.dropsByItem[ev.item_id] || 0) + qty;
-    state.lastItemId = ev.item_id;
-    const it = db.items[ev.item_id];
-    const npcPrice = it && typeof it.price === "number" ? it.price * qty : 0;
-    state.npcLootValue += npcPrice;
-    const split = ensureCurrentSplit(state.mapId, state.ch, evTs);
-    if (split) {
-      split.drops += qty;
-      split.mesos_gained += npcPrice;
-    }
-    saveSplits();
-    addFeed(
-      `Loot: ${it ? it.name : `Item #${ev.item_id}`} x${qty}${npcPrice > 0 ? ` (+${npcPrice.toLocaleString()} NPC)` : ""}`,
-      "drops"
-    );
-  },
-  meso_loot(ev, evTs) {
-    recordActiveTime(evTs);
-    state.mesos += ev.amount;
-    const split = ensureCurrentSplit(state.mapId, state.ch, evTs);
-    if (split) split.mesos_gained += ev.amount;
-    saveSplits();
-    addFeed(`+${ev.amount.toLocaleString()} mesos`, "mesos");
-  },
-};
-
-function handleEvent(ev) {
-  const fn = EVENT_HANDLERS[ev?.type];
-  if (!fn) return;
-  if (ev.type !== "mob_kill") state.events++;
-  fn(ev, ev.ts || Date.now());
+    setJobSelectValue(state.job);
+    if (res.splitsMerged) renderSplitsTable();
+    render();
+  } else if (msg.type === "events") {
+    for (const ev of msg.events || []) handleEvent(ev);
+    render();
+  } else if (msg.type) {
+    handleEvent(msg);
+    render();
+  }
 }
 
 function renderGuide() {
@@ -1001,6 +729,7 @@ function renderGuide() {
   });
 }
 
+/** @param {number | null} [liveActiveMs] */
 function renderSplitsTable(liveActiveMs = null) {
   splitsTableBody.innerHTML = renderSplitsHtml(state.mapSplits, db.maps, {
     mobsDb: db.mobs,
@@ -1013,73 +742,7 @@ function renderSplitsTable(liveActiveMs = null) {
   });
 }
 
-function handleInitMessage(d) {
-  if (d.hp != null) state.hp = d.hp;
-  if (d.mp != null) state.mp = d.mp;
-  if (d.max_hp) state.maxHp = d.max_hp;
-  if (d.max_mp) state.maxMp = d.max_mp;
-  if (d.map_id != null) state.mapId = d.map_id;
-  if (d.channel != null) state.ch = d.channel;
-  if (d.total_exp) state.totalExp = d.total_exp;
-  setCharacterProgression(d.level, d.job);
-
-  if (typeof d.session_exp === "number" && d.session_exp > state.sessionExp) {
-    state.sessionExp = d.session_exp;
-    if (!state.startTs) state.startTs = d.session_start_ts || Date.now();
-  }
-  if (typeof d.active_ms === "number" && d.active_ms > state.activeMs) state.activeMs = d.active_ms;
-  if (typeof d.kills === "number" && d.kills > state.kills) state.kills = d.kills;
-  if (typeof d.mesos === "number" && d.mesos > state.mesos) state.mesos = d.mesos;
-  if (typeof d.drops === "number" && d.drops > state.drops) state.drops = d.drops;
-  if (Array.isArray(d.map_splits)) {
-    for (const s of d.map_splits) {
-      if (!state.mapSplits.some((loc) => loc.map_id === s.map_id && loc.started_ts === s.started_ts)) {
-        state.mapSplits.push(s);
-      }
-    }
-    saveSplits();
-    renderSplitsTable();
-  }
-  if (state.mapId !== null) ensureCurrentSplit(state.mapId, state.ch, Date.now());
-  render();
-}
-
-function handleServerMessage(rawJson) {
-  let msg;
-  try {
-    msg = JSON.parse(rawJson);
-  } catch {
-    return;
-  }
-  if (msg.type === "raw_chunk") {
-    ingestRawChunk(msg.flow || "default", msg.seq || 0, msg.data || "");
-    return;
-  }
-  if (msg.type === "endpoint_ready") {
-    endpointStatusBadge.textContent = "ONLINE (Connected)";
-    endpointStatusBadge.classList.add("online");
-    return;
-  }
-  if (msg.type === "init" && msg.data) {
-    handleInitMessage(msg.data);
-  } else if (msg.type === "events") {
-    for (const ev of msg.events || []) handleEvent(ev);
-    render();
-  } else if (msg.type) {
-    handleEvent(msg);
-    render();
-  }
-}
-
-const SPRINT_TYPE_LABELS = Object.freeze({
-  exp_pct: "TARGET VALUE (% EXP)",
-  time: "TARGET MINUTES",
-  kills: "TARGET KILLS",
-  mesos: "TARGET MESOS",
-  drops: "TARGET DROPS",
-  mix: "PRIMARY TIME (MIN)",
-});
-
+// --- Sessions Planner Controller ---
 function populateSprintMobOptions() {
   const prevVal = sprintMobSelect.value;
   sprintMobSelect.replaceChildren();
@@ -1090,18 +753,23 @@ function populateSprintMobOptions() {
 
   /** @type {Array<{ id: number, name: string }>} */
   const mobs = [];
+  /** @type {Set<number>} */
   const seen = new Set();
+  /**
+   * @param {number | null | undefined} id
+   * @param {string | undefined} name
+   */
   const addMob = (id, name) => {
     if (id == null || seen.has(Number(id))) return;
     seen.add(Number(id));
     mobs.push({ id: Number(id), name: name || `Mob #${id}` });
   };
 
-  if (plannedMapContext?.mobs) {
-    for (const m of plannedMapContext.mobs) addMob(m.id, m.name);
+  if (sprintStore.plannedMapContext?.mobs) {
+    for (const m of sprintStore.plannedMapContext.mobs) addMob(m.id, m.name);
   }
   if (state.mapId != null) {
-    const mapEntry = db.guideMaps.find((m) => m.mapId === state.mapId);
+    const mapEntry = db.guideMaps.find((m) => (m.mapId ?? m.id) === state.mapId);
     if (mapEntry?.mobs) {
       for (const m of mapEntry.mobs) addMob(m.id, m.name);
     }
@@ -1123,20 +791,21 @@ function populateSprintMobOptions() {
 }
 
 function buildSprintDraftFromForm() {
-  const type = sprintTypeSelect.value || "exp_pct";
+  const type = /** @type {import("./types.js").SprintGoalType} */ (sprintTypeSelect.value || "exp_pct");
   const value = Math.max(1, Number(sprintValueInput.value) || 1);
   const mobId = type === "kills" && sprintMobSelect.value ? Number(sprintMobSelect.value) : null;
   const mobName = mobId != null ? sprintMobSelect.selectedOptions[0]?.textContent || db.mobs[mobId]?.name || null : null;
-  const mapId = plannedMapContext?.mapId ?? state.mapId ?? null;
-  const mapName = plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null);
+  const mapId = sprintStore.plannedMapContext?.mapId ?? state.mapId ?? null;
+  const mapName =
+    sprintStore.plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null);
   return createTargetSprint({
     type,
     value,
     level: state.level,
     totalExp: state.totalExp,
-    pace: sprintPaceSelect.value || "balanced",
-    compound: sprintCompoundMode.value || "any",
-    secondaryType: sprintSecondaryType.value || "exp_pct",
+    pace: /** @type {import("./types.js").SprintPace} */ (sprintPaceSelect.value || "balanced"),
+    compound: /** @type {import("./types.js").SprintCompoundRule} */ (sprintCompoundMode.value || "any"),
+    secondaryType: /** @type {"exp_pct" | "kills" | "mesos" | "drops"} */ (sprintSecondaryType.value || "exp_pct"),
     secondaryValue: Math.max(1, Number(sprintSecondaryValue.value) || 3),
     mobId,
     mobName,
@@ -1152,7 +821,7 @@ function updateSprintCalculator() {
   sprintMixRow.classList.toggle("hidden", type !== "mix");
 
   const draft = buildSprintDraftFromForm();
-  const est = estimateSession(draft, currentMeasuredRates(state.activeMs));
+  const est = estimateSession(draft, sessionModel.computeMeasuredRates());
   sprintCalcEstimateEl.replaceChildren();
 
   const line1 = document.createElement("strong");
@@ -1175,17 +844,18 @@ function renderSessionsPlanner() {
     }
   }
 
-  if (plannedMapContext) {
+  const ctx = sprintStore.plannedMapContext;
+  if (ctx) {
     sprintMapContextEl.classList.remove("hidden");
     sprintMapContextEl.replaceChildren();
     const text = document.createElement("span");
-    text.textContent = `Planned Map: ${plannedMapContext.name} (${plannedMapContext.mobs.map((m) => m.name).slice(0, 3).join(", ")})`;
+    text.textContent = `Planned Map: ${ctx.name} (${ctx.mobs.map((m) => m.name).slice(0, 3).join(", ")})`;
     const clearBtn = document.createElement("button");
     clearBtn.type = "button";
     clearBtn.className = "pill wake";
     clearBtn.textContent = "✕ Clear Map";
     clearBtn.addEventListener("click", () => {
-      plannedMapContext = null;
+      sprintStore.setPlannedMapContext(null);
       renderSessionsPlanner();
     });
     sprintMapContextEl.append(text, clearBtn);
@@ -1197,25 +867,30 @@ function renderSessionsPlanner() {
   updateSprintCalculator();
 }
 
+/** @param {import("./types.js").TargetSprint} sprint */
 function launchTargetSprint(sprint) {
   softResetSprint();
-  activeSprint = sprint;
-  saveJsonStorage(STORAGE_KEYS.activeSprint, activeSprint);
-  showToast("🎯 Target Sprint Started", activeSprint.title);
-  addFeed(`Started Target Sprint: ${activeSprint.title}`, "challenges", true);
+  sprintStore.startSprint(sprint);
+  toastView.show("🎯 Target Sprint Started", sprint.title);
+  feedView.add(`Started Target Sprint: ${sprint.title}`, "challenges", true);
   render();
   switchTab("hud");
 }
 
+// --- Navigation & UI Event Wiring ---
+/** @type {Array<[HTMLElement, HTMLElement, string]>} */
+const TAB_ROUTES = [
+  [tabHud, viewHud, "hud"],
+  [tabSessions, viewSessions, "sessions"],
+  [tabChallenges, viewChallenges, "challenges"],
+  [tabGuide, viewGuide, "guide"],
+  [tabHistory, viewHistory, "history"],
+  [tabSetup, viewSetup, "setup"],
+];
+
+/** @param {string} tabName */
 function switchTab(tabName) {
-  for (const [btn, view, key] of [
-    [tabHud, viewHud, "hud"],
-    [tabSessions, viewSessions, "sessions"],
-    [tabChallenges, viewChallenges, "challenges"],
-    [tabGuide, viewGuide, "guide"],
-    [tabHistory, viewHistory, "history"],
-    [tabSetup, viewSetup, "setup"],
-  ]) {
+  for (const [btn, view, key] of TAB_ROUTES) {
     const active = key === tabName;
     btn.classList.toggle("active", active);
     view.classList.toggle("hidden", !active);
@@ -1237,19 +912,13 @@ pipBtn.addEventListener("click", () => pipOverlay.toggle(render));
 hudPlanSprintBtn.addEventListener("click", () => switchTab("sessions"));
 hudManageChallengesBtn.addEventListener("click", () => switchTab("challenges"));
 hudClearSprintBtn.addEventListener("click", () => {
-  activeSprint = null;
-  saveJsonStorage(STORAGE_KEYS.activeSprint, null);
+  sprintStore.clearSprint();
   render();
 });
 
-feedFiltersEl.addEventListener("click", (ev) => {
-  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-feed-cat]");
-  if (!btn) return;
-  applyFeedFilter(btn.getAttribute("data-feed-cat") || "all");
-});
-
 sprintTemplatesRow.addEventListener("click", (ev) => {
-  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-template-id]");
+  const target = ev.target instanceof Element ? ev.target : null;
+  const btn = target?.closest("[data-template-id]");
   if (!btn) return;
   const tpl = SPRINT_TEMPLATES.find((t) => t.id === btn.getAttribute("data-template-id"));
   if (!tpl) return;
@@ -1284,8 +953,9 @@ quickSprintBtn.addEventListener("click", () => {
       value: 5,
       level: state.level,
       totalExp: state.totalExp,
-      mapId: plannedMapContext?.mapId ?? state.mapId ?? null,
-      mapName: plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null),
+      mapId: sprintStore.plannedMapContext?.mapId ?? state.mapId ?? null,
+      mapName:
+        sprintStore.plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null),
     })
   );
 });
@@ -1295,50 +965,38 @@ startSprintBtn.addEventListener("click", () => {
 });
 
 guideListEl.addEventListener("click", (ev) => {
-  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-plan-map-id]");
+  const target = ev.target instanceof Element ? ev.target : null;
+  const btn = target?.closest("[data-plan-map-id]");
   if (!btn) return;
   const mapId = Number(btn.getAttribute("data-plan-map-id"));
-  const entry = db.guideMaps.find((m) => m.mapId === mapId);
+  const entry = db.guideMaps.find((m) => (m.mapId ?? m.id) === mapId);
   if (!entry) return;
-  plannedMapContext = { mapId: entry.mapId, name: entry.name, mobs: entry.mobs || [] };
+  sprintStore.setPlannedMapContext({ mapId: entry.mapId ?? mapId, name: entry.name, mobs: entry.mobs || [] });
   switchTab("sessions");
 });
 
 challengesActiveList.addEventListener("click", (ev) => {
-  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-reroll-challenge]");
+  const target = ev.target instanceof Element ? ev.target : null;
+  const btn = target?.closest("[data-reroll-challenge]");
   if (!btn) return;
   const id = btn.getAttribute("data-reroll-challenge");
   if (!id) return;
-  activeChallenges = rerollChallenge(activeChallenges, id, state.level, getChallengeMobContext());
-  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  sprintStore.rerollSlot(id, state.level, getChallengeMobContext());
   renderChallenges();
 });
 
 challengesLibraryList.addEventListener("click", (ev) => {
-  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-pin-challenge]");
+  const target = ev.target instanceof Element ? ev.target : null;
+  const btn = target?.closest("[data-pin-challenge]");
   if (!btn) return;
   const id = btn.getAttribute("data-pin-challenge");
-  const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
-  const pick = lib.find((c) => c.id === id);
-  if (!pick || activeChallenges.some((c) => c.id === id)) return;
-  const fresh = { ...pick, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] };
-  if (activeChallenges.length < SPRINT_CONFIG.maxActiveChallenges) {
-    activeChallenges.push(fresh);
-  } else {
-    const doneIdx = activeChallenges.findIndex((c) => c.completed);
-    activeChallenges[doneIdx >= 0 ? doneIdx : activeChallenges.length - 1] = fresh;
-  }
-  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  if (!id) return;
+  sprintStore.pinChallenge(id, state.level, getChallengeMobContext());
   renderChallenges();
 });
 
 rerollAllChallengesBtn.addEventListener("click", () => {
-  const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
-  const shuffled = [...lib].sort(() => Math.random() - 0.5);
-  activeChallenges = shuffled
-    .slice(0, SPRINT_CONFIG.maxActiveChallenges)
-    .map((c) => ({ ...c, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] }));
-  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  sprintStore.rerollAll(state.level, getChallengeMobContext());
   renderChallenges();
 });
 
@@ -1346,21 +1004,21 @@ challengeCategoryFilter.addEventListener("change", renderChallenges);
 
 manualLevelInput.addEventListener("change", () => {
   const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
-  setCharacterProgression(lv, null);
+  syncCharacterProgressionUI(lv, null);
   render();
 });
 
 charJobEl.addEventListener("mousedown", () => {
   const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
   if (lv !== state.level) {
-    setCharacterProgression(lv, null);
+    syncCharacterProgressionUI(lv, null);
     render();
   }
 });
 
 charJobEl.addEventListener("change", () => {
   const jobId = Number(charJobEl.value) || 0;
-  setCharacterProgression(null, jobId);
+  syncCharacterProgressionUI(null, jobId);
   guideJobSelect.value = guideFilterForJob(jobId);
   render();
   renderGuide();
@@ -1377,41 +1035,10 @@ splitSearchInput.addEventListener("input", () => renderSplitsTable());
 splitOnlyKillsCheck.addEventListener("change", () => renderSplitsTable());
 
 function softResetSprint() {
-  clearPendingKill();
-  state.startTs = null;
-  state.activeMs = 0;
-  state.lastActiveTs = null;
-  state.sessionExp = 0;
-  state.lastExp = 0;
-  state.kills = 0;
-  state.killsByMob = {};
-  state.lastMobId = null;
-  state.mesos = 0;
-  state.npcLootValue = 0;
-  state.drops = 0;
-  state.dropsByItem = {};
-  state.lastItemId = null;
-  state.damageTaken = 0;
-  state.damageDealt = 0;
-  state.events = 0;
-  state.expWindow = [];
-  state.currentSplit = null;
-  if (activeSprint?.completed) {
-    activeSprint = null;
-    saveJsonStorage(STORAGE_KEYS.activeSprint, null);
-  }
-  for (const ch of activeChallenges) {
-    if (!ch.completed && ch.metric !== "weekly_sprints") {
-      ch.progress = 0;
-      ch.secondaryProgress = 0;
-    }
-  }
-  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
-  feedEl.replaceChildren();
-  if (state.mapId !== null) {
-    ensureCurrentSplit(state.mapId, state.ch, Date.now());
-  }
-  addFeed("Started new sprint (live connection & character state preserved)", "general");
+  sessionModel.softReset();
+  sprintStore.resetForNewSprint();
+  feedView.clear();
+  feedView.add("Started new sprint (live connection & character state preserved)", "general");
   renderSplitsTable();
   render();
 }
@@ -1427,9 +1054,7 @@ exportSplitsBtn.addEventListener("click", () => {
 });
 
 clearSplitsBtn.addEventListener("click", () => {
-  state.mapSplits = [];
-  state.currentSplit = null;
-  saveSplits();
+  sessionModel.clearSplits();
   renderSplitsTable();
   renderGuide();
 });
@@ -1445,17 +1070,18 @@ connectBtn.addEventListener("click", () => {
 });
 
 requireEl("resetBtn").addEventListener("click", () => {
-  clearPendingKill();
-  Object.assign(state, createSessionState(state.level, state.job, state.mapSplits));
+  sessionModel.hardReset();
   if (codecEngine.decoder && typeof codecEngine.decoder.reset === "function") {
     codecEngine.decoder.reset();
   }
-  feedEl.replaceChildren();
+  feedView.clear();
   mapLine.textContent = endpointClient.isOpen() ? "Connected — waiting for WireGuard game traffic..." : "Not connected";
   render();
 });
 
-/** @type {WakeLockSentinel | null} */ let wakeLock = null;
+// --- Wake Lock ---
+/** @type {WakeLockSentinel | null} */
+let wakeLock = null;
 let wakeWanted = localStorage.getItem(STORAGE_KEYS.wake) === "1";
 
 function updateWakeUi() {
@@ -1516,6 +1142,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && wakeWanted && !wakeLock) requestWakeLock();
 });
 
+// --- Boot ---
 setInterval(() => {
   if (state.startTs || state.rawChunksReceived > 0) render();
 }, HUD_CONFIG.renderIntervalMs);

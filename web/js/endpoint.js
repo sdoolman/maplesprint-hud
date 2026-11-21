@@ -126,6 +126,7 @@ export class EndpointClient {
     this.ws = null;
     /** @type {number | null} */
     this.reconnectTimer = null;
+    /** @type {number} */
     this.reconnectDelayMs = config.minReconnectMs;
     this.lastRawUrl = "";
   }

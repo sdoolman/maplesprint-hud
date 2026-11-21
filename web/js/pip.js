@@ -72,6 +72,12 @@ export class PipOverlay {
     link.href = this.cssHref;
     d.head.appendChild(link);
 
+    /**
+     * @param {string} tag
+     * @param {string} cls
+     * @param {string} [text]
+     * @returns {HTMLElement}
+     */
     const makeEl = (tag, cls, text = "") => {
       const node = d.createElement(tag);
       if (cls) node.className = cls;
@@ -101,6 +107,7 @@ export class PipOverlay {
     onOpened();
   }
 
+  /** @param {import("./types.js").PipSnapshot} snapshot */
   update({ xphVal, rolling5m, level, pct, etaText, isGrinding, mapName }) {
     if (!this.win || this.win.closed) return;
     if (this.els.xph) this.els.xph.textContent = `${formatCompact(xphVal)}/h (5m: ${formatCompact(rolling5m)})`;

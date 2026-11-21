@@ -130,10 +130,18 @@ const SPATIAL_PAD_Y = 150;
 const MIN_AREA_MPX = 0.1;
 const RESIST_SHARE_THRESHOLD = 0.2;
 
+/**
+ * @param {unknown} val
+ * @returns {boolean}
+ */
 function isResist(val) {
   return val === "Strong" || val === "Immune";
 }
 
+/**
+ * @param {{ mobPositions?: Array<{ x?: number, y?: number }>, mobCapacity?: number | null }} m
+ * @param {number} totalSpawns
+ */
 function computeMapSpatial(m, totalSpawns) {
   const pos = Array.isArray(m.mobPositions) ? m.mobPositions : [];
   const cap = Number(m.mobCapacity) || 0;
