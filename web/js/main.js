@@ -19,15 +19,29 @@ import { fetchCatalog } from "./catalog.js";
 import { ENDPOINT_CONFIG, EndpointClient, fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "./endpoint.js";
 import { renderGuideHtml, renderSplitsHtml } from "./guide.js";
 import { PipOverlay } from "./pip.js";
+import {
+  SPRINT_CONFIG,
+  SPRINT_TEMPLATES,
+  buildChallengeLibrary,
+  createDefaultChallenges,
+  createTargetSprint,
+  estimateSession,
+  evaluateSprintProgress,
+  renderChallengesTabHtml,
+  renderHudChallengesHtml,
+  rerollChallenge,
+  syncChallengesWithState,
+} from "./sprints.js";
 
 const HUD_CONFIG = Object.freeze({
-  maxFeedItems: 40,
+  maxFeedItems: 60,
   maxSplits: 50,
   killCorrelationMs: 500,
   renderIntervalMs: 1000,
   minRollingSpanMs: 15_000,
   defaultGuideLevel: 25,
   msPerHour: 3_600_000,
+  weekMs: 7 * 86_400_000,
 });
 
 const STORAGE_KEYS = Object.freeze({
@@ -39,6 +53,9 @@ const STORAGE_KEYS = Object.freeze({
   job: "ms_char_job",
   wake: "ms_wake",
   codec: "ms_codec_url",
+  activeSprint: "ms_active_sprint_v1",
+  challenges: "ms_challenges_v1",
+  sprintHistory: "ms_sprint_history_v1",
 });
 
 const endpointInput = /** @type {HTMLInputElement} */ (requireEl("endpointUrl"));
@@ -59,13 +76,51 @@ const feedEl = requireEl("feed");
 const eventCountEl = requireEl("eventCount");
 
 const tabHud = requireEl("tabHud");
+const tabSessions = requireEl("tabSessions");
+const tabChallenges = requireEl("tabChallenges");
 const tabGuide = requireEl("tabGuide");
 const tabHistory = requireEl("tabHistory");
 const tabSetup = requireEl("tabSetup");
 const viewHud = requireEl("viewHud");
+const viewSessions = requireEl("viewSessions");
+const viewChallenges = requireEl("viewChallenges");
 const viewGuide = requireEl("viewGuide");
 const viewHistory = requireEl("viewHistory");
 const viewSetup = requireEl("viewSetup");
+const toastContainer = requireEl("toastContainer");
+
+const hudSprintTitle = requireEl("hudSprintTitle");
+const hudSprintDetail = requireEl("hudSprintDetail");
+const hudSprintEta = requireEl("hudSprintEta");
+const hudPlanSprintBtn = /** @type {HTMLButtonElement} */ (requireEl("hudPlanSprintBtn"));
+const hudClearSprintBtn = /** @type {HTMLButtonElement} */ (requireEl("hudClearSprintBtn"));
+const hudSprintTrack = requireEl("hudSprintTrack");
+const hudSprintBar = requireEl("hudSprintBar");
+const hudManageChallengesBtn = /** @type {HTMLButtonElement} */ (requireEl("hudManageChallengesBtn"));
+const hudChallengesList = requireEl("hudChallengesList");
+const feedFiltersEl = requireEl("feedFilters");
+
+const quickSprintBtn = /** @type {HTMLButtonElement} */ (requireEl("quickSprintBtn"));
+const sprintMapContextEl = requireEl("sprintMapContext");
+const sprintTemplatesRow = requireEl("sprintTemplatesRow");
+const sprintTypeSelect = /** @type {HTMLSelectElement} */ (requireEl("sprintTypeSelect"));
+const sprintValueLabel = requireEl("sprintValueLabel");
+const sprintValueInput = /** @type {HTMLInputElement} */ (requireEl("sprintValueInput"));
+const sprintMobField = requireEl("sprintMobField");
+const sprintMobSelect = /** @type {HTMLSelectElement} */ (requireEl("sprintMobSelect"));
+const sprintPaceSelect = /** @type {HTMLSelectElement} */ (requireEl("sprintPaceSelect"));
+const sprintMixRow = requireEl("sprintMixRow");
+const sprintCompoundMode = /** @type {HTMLSelectElement} */ (requireEl("sprintCompoundMode"));
+const sprintSecondaryType = /** @type {HTMLSelectElement} */ (requireEl("sprintSecondaryType"));
+const sprintSecondaryValue = /** @type {HTMLInputElement} */ (requireEl("sprintSecondaryValue"));
+const sprintCalcEstimateEl = requireEl("sprintCalcEstimate");
+const startSprintBtn = /** @type {HTMLButtonElement} */ (requireEl("startSprintBtn"));
+
+const weeklySprintsTag = requireEl("weeklySprintsTag");
+const rerollAllChallengesBtn = /** @type {HTMLButtonElement} */ (requireEl("rerollAllChallengesBtn"));
+const challengesActiveList = requireEl("challengesActiveList");
+const challengeCategoryFilter = /** @type {HTMLSelectElement} */ (requireEl("challengeCategoryFilter"));
+const challengesLibraryList = requireEl("challengesLibraryList");
 
 const manualLevelInput = /** @type {HTMLInputElement} */ (requireEl("manualLevelInput"));
 const charJobEl = /** @type {HTMLSelectElement} */ (requireEl("charJob"));
@@ -117,22 +172,31 @@ endpointInput.value =
   localStorage.getItem(STORAGE_KEYS.legacyWorker) ||
   ENDPOINT_CONFIG.defaultUrl;
 
-const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261117j", import.meta.url).href);
+const pipOverlay = new PipOverlay(new URL("../css/pip.css?v=20261121b", import.meta.url).href);
 
-function loadSavedSplits() {
+function loadJsonStorage(key, fallback) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.splits);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
   } catch {
-    return [];
+    return fallback;
   }
 }
 
-function saveSplits() {
+function saveJsonStorage(key, value) {
   try {
-    localStorage.setItem(STORAGE_KEYS.splits, JSON.stringify(state.mapSplits.slice(0, HUD_CONFIG.maxSplits)));
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
   } catch {}
+}
+
+function loadSavedSplits() {
+  const parsed = loadJsonStorage(STORAGE_KEYS.splits, []);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function saveSplits() {
+  saveJsonStorage(STORAGE_KEYS.splits, state.mapSplits.slice(0, HUD_CONFIG.maxSplits));
 }
 
 const db = {
@@ -184,6 +248,42 @@ const state = createSessionState(
   localStorage.getItem(STORAGE_KEYS.job),
   loadSavedSplits()
 );
+
+/** @type {any | null} */
+let activeSprint = loadJsonStorage(STORAGE_KEYS.activeSprint, null);
+/** @type {Array<{ id: string, title: string, completedAt: number }>} */
+let sprintHistory = (() => {
+  const saved = loadJsonStorage(STORAGE_KEYS.sprintHistory, []);
+  return Array.isArray(saved) ? saved : [];
+})();
+/** @type {Array<any>} */
+let activeChallenges = (() => {
+  const saved = loadJsonStorage(STORAGE_KEYS.challenges, null);
+  if (Array.isArray(saved) && saved.length > 0) return saved.slice(0, SPRINT_CONFIG.maxActiveChallenges);
+  return createDefaultChallenges(state.level);
+})();
+/** @type {{ mapId: number, name: string, mobs: Array<any> } | null} */
+let plannedMapContext = null;
+let activeFeedCategory = "all";
+
+function getWeeklySprintCount() {
+  const cutoff = Date.now() - HUD_CONFIG.weekMs;
+  return sprintHistory.filter((s) => (s.completedAt || 0) >= cutoff).length;
+}
+
+function showToast(title, body) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const span = document.createElement("span");
+  span.textContent = body;
+  el.append(strong, span);
+  toastContainer.append(el);
+  window.setTimeout(() => {
+    el.remove();
+  }, 4500);
+}
 
 function guideFilterForJob(jobId) {
   const id = Number(jobId) || 0;
@@ -407,13 +507,31 @@ async function loadCatalog() {
     render();
     renderGuide();
     renderSplitsTable();
+    renderSessionsPlanner();
+    renderChallenges();
   } catch {
     dbStatus.textContent = "DB error";
   }
 }
 
-function addFeed(text) {
+function applyFeedFilter(cat) {
+  activeFeedCategory = cat || "all";
+  for (const btn of feedFiltersEl.querySelectorAll("[data-feed-cat]")) {
+    btn.classList.toggle("active", btn.getAttribute("data-feed-cat") === activeFeedCategory);
+  }
+  for (const li of feedEl.children) {
+    const itemCat = li.getAttribute("data-cat") || "general";
+    li.classList.toggle("hidden", activeFeedCategory !== "all" && itemCat !== activeFeedCategory);
+  }
+}
+
+function addFeed(text, category = "general", major = false) {
   const li = document.createElement("li");
+  li.dataset.cat = category;
+  if (major) li.classList.add("major");
+  if (activeFeedCategory !== "all" && category !== activeFeedCategory) {
+    li.classList.add("hidden");
+  }
   const msgSpan = document.createElement("span");
   msgSpan.textContent = text;
   const tsSpan = document.createElement("span");
@@ -573,6 +691,92 @@ function renderInventory(activeSec) {
   });
 }
 
+function currentMeasuredRates(effectiveActiveMs) {
+  const activeSec = Math.max((effectiveActiveMs || state.activeMs || 0) / 1000, 1);
+  if (!state.startTs || effectiveActiveMs < 15_000) return {};
+  const rolling5m = computeRolling5mXph(Date.now());
+  const xph = rolling5m > 0 ? rolling5m : Math.max(0, Math.floor((state.sessionExp * 3600) / activeSec));
+  const kpm = (state.kills * 60) / activeSec;
+  const mph = ((state.mesos + state.npcLootValue) * 3600) / activeSec;
+  const dpm = (state.drops * 60) / activeSec;
+  return { xph, kpm, mph, dpm };
+}
+
+function getChallengeMobContext() {
+  if (plannedMapContext?.mobs?.length) {
+    const top = plannedMapContext.mobs[0];
+    return { mobId: top.id ?? null, mobName: top.name ?? null };
+  }
+  if (state.lastMobId != null && db.mobs[state.lastMobId]) {
+    return { mobId: state.lastMobId, mobName: db.mobs[state.lastMobId].name };
+  }
+  return {};
+}
+
+function renderChallenges() {
+  const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
+  const weeklyCount = getWeeklySprintCount();
+  weeklySprintsTag.textContent = `${weeklyCount} sprint${weeklyCount === 1 ? "" : "s"} this week`;
+  hudChallengesList.innerHTML = renderHudChallengesHtml(activeChallenges);
+  if (!viewChallenges.classList.contains("hidden")) {
+    const { activeHtml, libHtml } = renderChallengesTabHtml(
+      activeChallenges,
+      lib,
+      challengeCategoryFilter.value || "All"
+    );
+    challengesActiveList.innerHTML = activeHtml;
+    challengesLibraryList.innerHTML = libHtml;
+  }
+}
+
+function renderActiveSprintAndChallenges(effectiveActiveMs, rates) {
+  if (activeSprint) {
+    const prog = evaluateSprintProgress(activeSprint, state, effectiveActiveMs, rates);
+    if (prog) {
+      const mapSuffix = activeSprint.mapName ? ` @ ${activeSprint.mapName}` : "";
+      hudSprintTitle.textContent = `${activeSprint.title}${mapSuffix}`;
+      hudSprintDetail.textContent = prog.summaryLabel;
+      hudSprintEta.textContent = prog.etaLabel;
+      hudSprintTrack.classList.remove("hidden");
+      hudClearSprintBtn.classList.remove("hidden");
+      hudSprintBar.style.width = `${prog.pct.toFixed(1)}%`;
+      hudSprintBar.classList.toggle("done", prog.completed);
+      if (prog.completed && !activeSprint.completed) {
+        activeSprint.completed = true;
+        activeSprint.completedAt = Date.now();
+        saveJsonStorage(STORAGE_KEYS.activeSprint, activeSprint);
+        sprintHistory.unshift({
+          id: activeSprint.id,
+          title: activeSprint.title,
+          completedAt: activeSprint.completedAt,
+        });
+        if (sprintHistory.length > 50) sprintHistory.length = 50;
+        saveJsonStorage(STORAGE_KEYS.sprintHistory, sprintHistory);
+        showToast("🎯 Sprint Complete!", `${activeSprint.title}${mapSuffix}`);
+        addFeed(`Sprint Complete: ${activeSprint.title}${mapSuffix}`, "challenges", true);
+      }
+    }
+  } else {
+    hudSprintTitle.textContent = "No target active";
+    hudSprintDetail.textContent = "Plan a target session or start grinding freely.";
+    hudSprintEta.textContent = "No target";
+    hudSprintTrack.classList.add("hidden");
+    hudClearSprintBtn.classList.add("hidden");
+    hudSprintBar.style.width = "0%";
+    hudSprintBar.classList.remove("done");
+  }
+
+  const newlyDone = syncChallengesWithState(activeChallenges, state, effectiveActiveMs, getWeeklySprintCount());
+  if (newlyDone.length > 0) {
+    saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+    for (const ch of newlyDone) {
+      showToast("🏆 Challenge Complete!", ch.title);
+      addFeed(`Challenge Complete: ${ch.title}`, "challenges", true);
+    }
+  }
+  renderChallenges();
+}
+
 function render() {
   const now = Date.now();
   const isGrinding = state.lastActiveTs !== null && now - state.lastActiveTs <= AUTO_PAUSE_IDLE_MS;
@@ -632,6 +836,13 @@ function render() {
     renderSplitsTable(liveSplitMs);
   }
 
+  renderActiveSprintAndChallenges(effectiveActiveMs, {
+    xph: rolling5m > 0 ? rolling5m : xphVal,
+    kpm: state.startTs ? (state.kills * 60) / activeSec : 0,
+    mph: state.startTs ? ((state.mesos + state.npcLootValue) * 3600) / activeSec : 0,
+    dpm: state.startTs ? (state.drops * 60) / activeSec : 0,
+  });
+
   pipOverlay.update({
     xphVal,
     rolling5m,
@@ -669,7 +880,7 @@ const EVENT_HANDLERS = {
             : Math.round(mob.hp * Math.min(1, ev.gain / mob.exp));
         state.damageDealt += Math.max(0, dmg);
       }
-      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${mobId}`}`);
+      addFeed(`Killed ${mob ? `${mob.name} (Lv.${mob.level ?? "?"})` : `Mob #${mobId}`}`, "kills");
       clearPendingKill();
     }
     state.sessionExp += ev.gain;
@@ -697,7 +908,9 @@ const EVENT_HANDLERS = {
     addFeed(
       ev.loss || ev.gain < 0
         ? `EXP Loss: ${ev.gain.toLocaleString()} EXP (Total: ${(ev.total_exp ?? 0).toLocaleString()})`
-        : `+${ev.gain.toLocaleString()} EXP (Total: ${(ev.total_exp ?? 0).toLocaleString()})`
+        : `+${ev.gain.toLocaleString()} EXP (Total: ${(ev.total_exp ?? 0).toLocaleString()})`,
+      "exp",
+      Boolean(ev.loss || ev.gain < 0)
     );
   },
   char_stats(ev) {
@@ -716,7 +929,7 @@ const EVENT_HANDLERS = {
     }
     if (ev.damage_taken) {
       state.damageTaken += ev.damage_taken;
-      addFeed(`Took ${ev.damage_taken} dmg (HP ${ev.hp})`);
+      addFeed(`Took ${ev.damage_taken} dmg (HP ${ev.hp})`, "kills");
     }
     if (ev.mp_delta) mpSubEl.textContent = `${ev.mp_delta > 0 ? "+" : ""}${ev.mp_delta} MP`;
   },
@@ -725,7 +938,7 @@ const EVENT_HANDLERS = {
     state.ch = ev.channel;
     ensureCurrentSplit(ev.map_id, ev.channel, evTs);
     const m = db.maps[ev.map_id];
-    addFeed(`Entered ${m ? m.name : `Map #${ev.map_id}`} (Ch. ${ev.channel})`);
+    addFeed(`Entered ${m ? m.name : `Map #${ev.map_id}`} (Ch. ${ev.channel})`, "general");
     renderSplitsTable();
   },
   mob_kill(ev) {
@@ -750,7 +963,10 @@ const EVENT_HANDLERS = {
       split.mesos_gained += npcPrice;
     }
     saveSplits();
-    addFeed(`Loot: ${it ? it.name : `Item #${ev.item_id}`} x${qty}${npcPrice > 0 ? ` (+${npcPrice.toLocaleString()} NPC)` : ""}`);
+    addFeed(
+      `Loot: ${it ? it.name : `Item #${ev.item_id}`} x${qty}${npcPrice > 0 ? ` (+${npcPrice.toLocaleString()} NPC)` : ""}`,
+      "drops"
+    );
   },
   meso_loot(ev, evTs) {
     recordActiveTime(evTs);
@@ -758,7 +974,7 @@ const EVENT_HANDLERS = {
     const split = ensureCurrentSplit(state.mapId, state.ch, evTs);
     if (split) split.mesos_gained += ev.amount;
     saveSplits();
-    addFeed(`+${ev.amount.toLocaleString()} mesos`);
+    addFeed(`+${ev.amount.toLocaleString()} mesos`, "mesos");
   },
 };
 
@@ -855,9 +1071,147 @@ function handleServerMessage(rawJson) {
   }
 }
 
+const SPRINT_TYPE_LABELS = Object.freeze({
+  exp_pct: "TARGET VALUE (% EXP)",
+  time: "TARGET MINUTES",
+  kills: "TARGET KILLS",
+  mesos: "TARGET MESOS",
+  drops: "TARGET DROPS",
+  mix: "PRIMARY TIME (MIN)",
+});
+
+function populateSprintMobOptions() {
+  const prevVal = sprintMobSelect.value;
+  sprintMobSelect.replaceChildren();
+  const anyOpt = document.createElement("option");
+  anyOpt.value = "";
+  anyOpt.textContent = "Any monster";
+  sprintMobSelect.append(anyOpt);
+
+  /** @type {Array<{ id: number, name: string }>} */
+  const mobs = [];
+  const seen = new Set();
+  const addMob = (id, name) => {
+    if (id == null || seen.has(Number(id))) return;
+    seen.add(Number(id));
+    mobs.push({ id: Number(id), name: name || `Mob #${id}` });
+  };
+
+  if (plannedMapContext?.mobs) {
+    for (const m of plannedMapContext.mobs) addMob(m.id, m.name);
+  }
+  if (state.mapId != null) {
+    const mapEntry = db.guideMaps.find((m) => m.mapId === state.mapId);
+    if (mapEntry?.mobs) {
+      for (const m of mapEntry.mobs) addMob(m.id, m.name);
+    }
+  }
+  for (const idStr of Object.keys(state.killsByMob)) {
+    const id = Number(idStr);
+    if (id > 0) addMob(id, db.mobs[id]?.name);
+  }
+
+  for (const m of mobs) {
+    const opt = document.createElement("option");
+    opt.value = String(m.id);
+    opt.textContent = m.name;
+    sprintMobSelect.append(opt);
+  }
+  if ([...sprintMobSelect.options].some((o) => o.value === prevVal)) {
+    sprintMobSelect.value = prevVal;
+  }
+}
+
+function buildSprintDraftFromForm() {
+  const type = sprintTypeSelect.value || "exp_pct";
+  const value = Math.max(1, Number(sprintValueInput.value) || 1);
+  const mobId = type === "kills" && sprintMobSelect.value ? Number(sprintMobSelect.value) : null;
+  const mobName = mobId != null ? sprintMobSelect.selectedOptions[0]?.textContent || db.mobs[mobId]?.name || null : null;
+  const mapId = plannedMapContext?.mapId ?? state.mapId ?? null;
+  const mapName = plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null);
+  return createTargetSprint({
+    type,
+    value,
+    level: state.level,
+    totalExp: state.totalExp,
+    pace: sprintPaceSelect.value || "balanced",
+    compound: sprintCompoundMode.value || "any",
+    secondaryType: sprintSecondaryType.value || "exp_pct",
+    secondaryValue: Math.max(1, Number(sprintSecondaryValue.value) || 3),
+    mobId,
+    mobName,
+    mapId,
+    mapName,
+  });
+}
+
+function updateSprintCalculator() {
+  const type = sprintTypeSelect.value || "exp_pct";
+  sprintValueLabel.textContent = SPRINT_TYPE_LABELS[type] || "TARGET VALUE";
+  sprintMobField.classList.toggle("hidden", type !== "kills");
+  sprintMixRow.classList.toggle("hidden", type !== "mix");
+
+  const draft = buildSprintDraftFromForm();
+  const est = estimateSession(draft, currentMeasuredRates(state.activeMs));
+  sprintCalcEstimateEl.replaceChildren();
+
+  const line1 = document.createElement("strong");
+  line1.textContent = `Est. ~${est.estMins} min · ${est.difficulty} (${draft.title})`;
+  const line2 = document.createElement("span");
+  line2.className = "muted small";
+  line2.textContent = est.splitHint ? `${est.rateSource} — ${est.splitHint}` : est.rateSource;
+  sprintCalcEstimateEl.append(line1, line2);
+}
+
+function renderSessionsPlanner() {
+  if (sprintTemplatesRow.children.length === 0) {
+    for (const tpl of SPRINT_TEMPLATES) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "pill wake";
+      btn.textContent = tpl.name;
+      btn.dataset.templateId = tpl.id;
+      sprintTemplatesRow.append(btn);
+    }
+  }
+
+  if (plannedMapContext) {
+    sprintMapContextEl.classList.remove("hidden");
+    sprintMapContextEl.replaceChildren();
+    const text = document.createElement("span");
+    text.textContent = `Planned Map: ${plannedMapContext.name} (${plannedMapContext.mobs.map((m) => m.name).slice(0, 3).join(", ")})`;
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "pill wake";
+    clearBtn.textContent = "✕ Clear Map";
+    clearBtn.addEventListener("click", () => {
+      plannedMapContext = null;
+      renderSessionsPlanner();
+    });
+    sprintMapContextEl.append(text, clearBtn);
+  } else {
+    sprintMapContextEl.classList.add("hidden");
+  }
+
+  populateSprintMobOptions();
+  updateSprintCalculator();
+}
+
+function launchTargetSprint(sprint) {
+  softResetSprint();
+  activeSprint = sprint;
+  saveJsonStorage(STORAGE_KEYS.activeSprint, activeSprint);
+  showToast("🎯 Target Sprint Started", activeSprint.title);
+  addFeed(`Started Target Sprint: ${activeSprint.title}`, "challenges", true);
+  render();
+  switchTab("hud");
+}
+
 function switchTab(tabName) {
   for (const [btn, view, key] of [
     [tabHud, viewHud, "hud"],
+    [tabSessions, viewSessions, "sessions"],
+    [tabChallenges, viewChallenges, "challenges"],
     [tabGuide, viewGuide, "guide"],
     [tabHistory, viewHistory, "history"],
     [tabSetup, viewSetup, "setup"],
@@ -866,15 +1220,129 @@ function switchTab(tabName) {
     btn.classList.toggle("active", active);
     view.classList.toggle("hidden", !active);
   }
+  if (tabName === "sessions") renderSessionsPlanner();
+  if (tabName === "challenges") renderChallenges();
   if (tabName === "guide") renderGuide();
   if (tabName === "history") renderSplitsTable();
 }
 
 tabHud.addEventListener("click", () => switchTab("hud"));
+tabSessions.addEventListener("click", () => switchTab("sessions"));
+tabChallenges.addEventListener("click", () => switchTab("challenges"));
 tabGuide.addEventListener("click", () => switchTab("guide"));
 tabHistory.addEventListener("click", () => switchTab("history"));
 tabSetup.addEventListener("click", () => switchTab("setup"));
 pipBtn.addEventListener("click", () => pipOverlay.toggle(render));
+
+hudPlanSprintBtn.addEventListener("click", () => switchTab("sessions"));
+hudManageChallengesBtn.addEventListener("click", () => switchTab("challenges"));
+hudClearSprintBtn.addEventListener("click", () => {
+  activeSprint = null;
+  saveJsonStorage(STORAGE_KEYS.activeSprint, null);
+  render();
+});
+
+feedFiltersEl.addEventListener("click", (ev) => {
+  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-feed-cat]");
+  if (!btn) return;
+  applyFeedFilter(btn.getAttribute("data-feed-cat") || "all");
+});
+
+sprintTemplatesRow.addEventListener("click", (ev) => {
+  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-template-id]");
+  if (!btn) return;
+  const tpl = SPRINT_TEMPLATES.find((t) => t.id === btn.getAttribute("data-template-id"));
+  if (!tpl) return;
+  sprintTypeSelect.value = tpl.type;
+  sprintValueInput.value = String(tpl.value);
+  sprintPaceSelect.value = tpl.pace || "balanced";
+  if (tpl.type === "mix") {
+    sprintCompoundMode.value = tpl.compound || "any";
+    sprintSecondaryType.value = tpl.secondaryType || "exp_pct";
+    sprintSecondaryValue.value = String(tpl.secondaryValue || 3);
+  }
+  updateSprintCalculator();
+});
+
+for (const ctrl of [
+  sprintTypeSelect,
+  sprintValueInput,
+  sprintMobSelect,
+  sprintPaceSelect,
+  sprintCompoundMode,
+  sprintSecondaryType,
+  sprintSecondaryValue,
+]) {
+  ctrl.addEventListener("input", updateSprintCalculator);
+  ctrl.addEventListener("change", updateSprintCalculator);
+}
+
+quickSprintBtn.addEventListener("click", () => {
+  launchTargetSprint(
+    createTargetSprint({
+      type: "exp_pct",
+      value: 5,
+      level: state.level,
+      totalExp: state.totalExp,
+      mapId: plannedMapContext?.mapId ?? state.mapId ?? null,
+      mapName: plannedMapContext?.name ?? (state.mapId != null ? db.maps[state.mapId]?.name || null : null),
+    })
+  );
+});
+
+startSprintBtn.addEventListener("click", () => {
+  launchTargetSprint(buildSprintDraftFromForm());
+});
+
+guideListEl.addEventListener("click", (ev) => {
+  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-plan-map-id]");
+  if (!btn) return;
+  const mapId = Number(btn.getAttribute("data-plan-map-id"));
+  const entry = db.guideMaps.find((m) => m.mapId === mapId);
+  if (!entry) return;
+  plannedMapContext = { mapId: entry.mapId, name: entry.name, mobs: entry.mobs || [] };
+  switchTab("sessions");
+});
+
+challengesActiveList.addEventListener("click", (ev) => {
+  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-reroll-challenge]");
+  if (!btn) return;
+  const id = btn.getAttribute("data-reroll-challenge");
+  if (!id) return;
+  activeChallenges = rerollChallenge(activeChallenges, id, state.level, getChallengeMobContext());
+  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  renderChallenges();
+});
+
+challengesLibraryList.addEventListener("click", (ev) => {
+  const btn = /** @type {HTMLElement | null} */ (ev.target)?.closest("[data-pin-challenge]");
+  if (!btn) return;
+  const id = btn.getAttribute("data-pin-challenge");
+  const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
+  const pick = lib.find((c) => c.id === id);
+  if (!pick || activeChallenges.some((c) => c.id === id)) return;
+  const fresh = { ...pick, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] };
+  if (activeChallenges.length < SPRINT_CONFIG.maxActiveChallenges) {
+    activeChallenges.push(fresh);
+  } else {
+    const doneIdx = activeChallenges.findIndex((c) => c.completed);
+    activeChallenges[doneIdx >= 0 ? doneIdx : activeChallenges.length - 1] = fresh;
+  }
+  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  renderChallenges();
+});
+
+rerollAllChallengesBtn.addEventListener("click", () => {
+  const lib = buildChallengeLibrary(state.level, getChallengeMobContext());
+  const shuffled = [...lib].sort(() => Math.random() - 0.5);
+  activeChallenges = shuffled
+    .slice(0, SPRINT_CONFIG.maxActiveChallenges)
+    .map((c) => ({ ...c, progress: 0, secondaryProgress: 0, completed: false, completedAt: null, visitedMaps: [] }));
+  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
+  renderChallenges();
+});
+
+challengeCategoryFilter.addEventListener("change", renderChallenges);
 
 manualLevelInput.addEventListener("change", () => {
   const lv = Math.max(1, Math.min(MAX_CLASSIC_LEVEL, Number(manualLevelInput.value) || 1));
@@ -928,11 +1396,22 @@ function softResetSprint() {
   state.events = 0;
   state.expWindow = [];
   state.currentSplit = null;
+  if (activeSprint?.completed) {
+    activeSprint = null;
+    saveJsonStorage(STORAGE_KEYS.activeSprint, null);
+  }
+  for (const ch of activeChallenges) {
+    if (!ch.completed && ch.metric !== "weekly_sprints") {
+      ch.progress = 0;
+      ch.secondaryProgress = 0;
+    }
+  }
+  saveJsonStorage(STORAGE_KEYS.challenges, activeChallenges);
   feedEl.replaceChildren();
   if (state.mapId !== null) {
     ensureCurrentSplit(state.mapId, state.ch, Date.now());
   }
-  addFeed("Started new sprint (live connection & character state preserved)");
+  addFeed("Started new sprint (live connection & character state preserved)", "general");
   renderSplitsTable();
   render();
 }
@@ -1043,6 +1522,8 @@ setInterval(() => {
 
 setInterval(refreshEndpointStatus, ENDPOINT_CONFIG.probeIntervalMs);
 
+renderSessionsPlanner();
+renderChallenges();
 initCodec();
 loadCatalog();
 refreshEndpointStatus();

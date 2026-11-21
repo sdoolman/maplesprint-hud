@@ -7,6 +7,19 @@ import { buildGuideIndex, normalizeItems, normalizeMaps, normalizeMonsters } fro
 import { CLASSIC_EXP_TABLE, JOB_NAMES, MAX_CLASSIC_LEVEL, base64ToBytes, eligibleJobsForLevel, escapeHtml, formatCompact, formatDuration, minLevelForJob, normalizeJobForLevel } from "../web/js/constants.js";
 import { fetchWireGuardConf, probeEndpoint, sanitizeEndpointUrl } from "../web/js/endpoint.js";
 import { recordedRateForMap, renderGuideHtml, renderSplitsHtml, scoreMap } from "../web/js/guide.js";
+import {
+  SPRINT_TEMPLATES,
+  buildChallengeLibrary,
+  createDefaultChallenges,
+  createTargetSprint,
+  estimateSession,
+  evaluateSprintProgress,
+  expForPercentDelta,
+  renderChallengesTabHtml,
+  renderHudChallengesHtml,
+  rerollChallenge,
+  syncChallengesWithState,
+} from "../web/js/sprints.js";
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
 const webDir = path.join(rootDir, "web");
@@ -443,4 +456,103 @@ test("Phase 0 HUD: soft reset, per-mob kills, EXP detail, dmg/m, and filtered re
   assert.match(filteredHtml, /Ligator ×20/);
   assert.match(filteredHtml, /00:01:30/);
   assert.ok(!filteredHtml.includes("00:00:04"), "0-kill visit below minTimeSec must be filtered out");
+});
+
+test("Phase 1 Target Sessions: expForPercentDelta, estimator split hint, and all 6 measurable goal types work accurately", () => {
+  assert.equal(SPRINT_TEMPLATES.length, 6);
+
+  // Within level: Lv.10 req is CLASSIC_EXP_TABLE[10], 10% should be ceil(0.1 * req)
+  const lv10Req = CLASSIC_EXP_TABLE[10];
+  assert.equal(expForPercentDelta(10, 0, 10), Math.ceil(lv10Req * 0.1));
+
+  // Across level boundary: 95% of Lv.10 already filled -> +10% needs 5% of Lv.10 + 5% of Lv.11
+  const lv11Req = CLASSIC_EXP_TABLE[11];
+  const cur95 = Math.round(lv10Req * 0.95);
+  const crossExp = expForPercentDelta(10, cur95, 10);
+  assert.ok(crossExp > lv10Req - cur95 && crossExp <= (lv10Req - cur95) + Math.ceil(lv11Req * 0.06));
+
+  // Long session estimator suggests splitting > 60m
+  const longTimeSprint = createTargetSprint({ type: "time", value: 90, level: 25 });
+  const longEst = estimateSession(longTimeSprint, { xph: 100_000 });
+  assert.equal(longEst.estMins, 90);
+  assert.equal(longEst.suggestSplit, true);
+  assert.ok(longEst.splitHint && longEst.splitHint.includes("splitting"));
+
+  // Specific mob kills evaluation
+  const mobSprint = createTargetSprint({ type: "kills", value: 50, mobId: 29, mobName: "Ligator", level: 25 });
+  const halfMob = evaluateSprintProgress(mobSprint, { kills: 80, killsByMob: { 29: { count: 25, exp: 1450 } } }, 60_000, { kpm: 10 });
+  assert.equal(halfMob?.pct, 50);
+  assert.equal(halfMob?.completed, false);
+  const doneMob = evaluateSprintProgress(mobSprint, { kills: 80, killsByMob: { 29: { count: 50, exp: 2900 } } }, 60_000, { kpm: 10 });
+  assert.equal(doneMob?.completed, true);
+  assert.equal(doneMob?.etaLabel, "Target Complete!");
+
+  // Compound "any" vs "all" mix
+  const mixAny = createTargetSprint({ type: "mix", value: 30, secondaryType: "drops", secondaryValue: 10, compound: "any", level: 25 });
+  const anyProg = evaluateSprintProgress(mixAny, { drops: 10 }, 5 * 60_000, { dpm: 2 });
+  assert.equal(anyProg?.completed, true);
+
+  const mixAll = createTargetSprint({ type: "mix", value: 30, secondaryType: "drops", secondaryValue: 10, compound: "all", level: 25 });
+  const allProg = evaluateSprintProgress(mixAll, { drops: 10 }, 15 * 60_000, { dpm: 2 });
+  assert.equal(allProg?.completed, false);
+  assert.equal(allProg?.pct, 75);
+});
+
+test("Phase 1 Challenges, Plan Sprint Here CTA, 5-tab navigation, and Live Feed filters work accurately", () => {
+  const lib = buildChallengeLibrary(25, { mobId: 29, mobName: "Ligator" });
+  assert.ok(lib.some((c) => c.id === "ch_mob_29" && c.title.includes("Ligator")));
+
+  const active = createDefaultChallenges(25);
+  assert.equal(active.length, 3);
+  const rerolled = rerollChallenge(active, active[0].id, 25);
+  assert.equal(rerolled.length, 3);
+  assert.notEqual(rerolled[0].id, active[0].id);
+
+  // Sync completion detection
+  const newlyDone = syncChallengesWithState(
+    active,
+    { sessionExp: 0, kills: 100, mesos: 30_000, npcLootValue: 0, drops: 0, mapSplits: [] },
+    60_000,
+    1
+  );
+  assert.equal(newlyDone.length, 2); // kills 100 + mesos 25k
+  assert.equal(syncChallengesWithState(active, { sessionExp: 0, kills: 100, mesos: 30_000, npcLootValue: 0, drops: 0, mapSplits: [] }, 60_000, 1).length, 0);
+
+  const hudChHtml = renderHudChallengesHtml(active);
+  assert.match(hudChHtml, /hud-ch-item done/);
+  const tabCh = renderChallengesTabHtml(active, lib, "Combat");
+  assert.match(tabCh.activeHtml, /data-reroll-challenge=/);
+  assert.match(tabCh.libHtml, /data-pin-challenge=/);
+
+  // Guide card includes Plan Sprint Here CTA
+  const guideHtml = renderGuideHtml({
+    loaded: true,
+    guideMaps: [
+      {
+        mapId: 10003090,
+        name: "Swamp I",
+        street: "Warning Street",
+        region: "Victoria",
+        avgLevel: 21,
+        avgExp: 40,
+        avgHpPerExp: 6,
+        totalSpawns: 24,
+        spatialDensity: 20,
+        mobs: [{ id: 18, name: "Jr. Necki", level: 21, exp: 40, hp: 240, count: 24 }],
+      },
+    ],
+    mapSplits: [],
+    charLv: 21,
+    jobFilter: "all",
+    sortBy: "score",
+    query: "",
+  });
+  assert.match(guideHtml, /data-plan-map-id="10003090"/);
+  assert.match(guideHtml, /Plan Sprint Here/);
+
+  // 5-tab nav + corner Setup + feed filter chips
+  assert.match(html, /id="tabSessions"/);
+  assert.match(html, /id="tabChallenges"/);
+  assert.match(html, /id="feedFilters"/);
+  assert.match(html, /data-feed-cat="challenges"/);
 });

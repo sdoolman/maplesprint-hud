@@ -280,7 +280,10 @@ function buildGuideCardHtml(entry, rankIndex) {
       ${buildMobTableHtml(entry.mobs)}
       <div class="guide-details-footer">
         <span class="muted small">Map #${entry.mapId}</span>
-        <div class="guide-links">${buildMapLinksHtml(entry.mapId, safeName)}</div>
+        <div class="guide-links">
+          <button class="plan-sprint-btn" type="button" data-plan-map-id="${entry.mapId}">🎯 Plan Sprint Here</button>
+          ${buildMapLinksHtml(entry.mapId, safeName)}
+        </div>
       </div>
     </div>
   </details>`;

@@ -4,9 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>MapleSprint HUD</title>
-  <link rel="stylesheet" href="css/style.css?v=20261121a" />
+  <link rel="stylesheet" href="css/style.css?v=20261121b" />
 </head>
 <body>
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
   <main class="wrap">
     <header class="top">
       <div>
@@ -20,24 +21,26 @@
         <button id="softResetBtn" class="pill wake" type="button" title="Start a new logical sprint (keeps connection, HP/MP, level, job, and current map)">↻ New Sprint</button>
         <button id="pipBtn" class="pill wake" type="button" title="Pop out always-on-top Mini Overlay">⧉ Mini</button>
         <button id="wakeBtn" class="pill wake" type="button" aria-pressed="false" title="Keep screen awake">☀ Wake</button>
+        <button id="tabSetup" class="pill wake" type="button" title="WireGuard, Local Endpoint, Codec & Catalog Setup">⚙ Setup</button>
         <span id="statusDot" class="pill offline">OFFLINE</span>
       </div>
     </header>
 
     <nav class="tabs-bar" aria-label="Main Navigation">
       <button id="tabHud" class="tab-btn active" type="button">⚡ Live HUD</button>
+      <button id="tabSessions" class="tab-btn" type="button">🎯 Sessions</button>
+      <button id="tabChallenges" class="tab-btn" type="button">🏆 Challenges</button>
       <button id="tabGuide" class="tab-btn" type="button">🗺️ Best Maps</button>
       <button id="tabHistory" class="tab-btn" type="button">📜 Map Log</button>
-      <button id="tabSetup" class="tab-btn" type="button">⚙ Setup</button>
     </nav>
 
-    <!-- TAB 1: LIVE HUD (PURE TELEMETRY) -->
+    <!-- TAB 1: LIVE HUD -->
     <div id="viewHud" class="tab-view">
       <div class="hud-layout">
         <div class="hud-main">
           <section class="card level-card">
             <div class="level-header">
-            <div class="level-identity">
+              <div class="level-identity">
                 <span class="level-badge">Lv. <input id="manualLevelInput" type="number" min="1" max="100" value="1" title="Character Level (auto-updates from packet stream or set manually)" /></span>
                 <select id="charJob" class="job-badge" aria-label="Character Job" title="Character Job (auto-updates from packet stream or set manually)"></select>
               </div>
@@ -49,6 +52,24 @@
             </div>
             <div class="progress-track">
               <div id="levelProgressBar" class="progress-fill" style="width: 0%"></div>
+            </div>
+          </section>
+
+          <section id="sprintCard" class="card sprint-banner">
+            <div class="sprint-banner-top">
+              <div class="sprint-banner-title">
+                <span class="label">ACTIVE TARGET SPRINT</span>
+                <strong id="hudSprintTitle">No target active</strong>
+                <span id="hudSprintDetail" class="muted small">Plan a target session or start grinding freely.</span>
+              </div>
+              <div class="sprint-banner-actions">
+                <span id="hudSprintEta" class="eta-pill">No target</span>
+                <button id="hudPlanSprintBtn" class="pill wake" type="button">🎯 Plan Target</button>
+                <button id="hudClearSprintBtn" class="pill wake hidden" type="button" title="Clear active target">✕</button>
+              </div>
+            </div>
+            <div id="hudSprintTrack" class="progress-track hidden">
+              <div id="hudSprintBar" class="progress-fill sprint-fill" style="width: 0%"></div>
             </div>
           </section>
 
@@ -96,6 +117,14 @@
               <div id="dropsBreakdown" class="breakdown-list"></div>
             </div>
           </section>
+
+          <section id="hudChallengesCard" class="card hud-challenges">
+            <div class="label-row">
+              <div class="label">ACTIVE CHALLENGES</div>
+              <button id="hudManageChallengesBtn" class="hs-link" type="button">Manage ↗</button>
+            </div>
+            <div id="hudChallengesList" class="hud-ch-list"></div>
+          </section>
         </div>
 
         <aside class="card hud-side">
@@ -103,9 +132,134 @@
             <div class="label">LIVE FEED</div>
             <span id="eventCount" class="muted small">0 events</span>
           </div>
+          <div id="feedFilters" class="feed-filters" role="group" aria-label="Filter Live Feed">
+            <button class="feed-chip active" type="button" data-feed-cat="all">All</button>
+            <button class="feed-chip" type="button" data-feed-cat="exp">EXP</button>
+            <button class="feed-chip" type="button" data-feed-cat="kills">Kills</button>
+            <button class="feed-chip" type="button" data-feed-cat="drops">Drops</button>
+            <button class="feed-chip" type="button" data-feed-cat="mesos">Mesos</button>
+            <button class="feed-chip" type="button" data-feed-cat="challenges">Milestones</button>
+          </div>
           <ul id="feed" class="feed"></ul>
         </aside>
       </div>
+    </div>
+
+    <!-- TAB 2: TARGET SESSIONS PLANNER -->
+    <div id="viewSessions" class="tab-view hidden">
+      <section class="card session-builder-card">
+        <div class="history-header">
+          <div>
+            <h2>Plan a Target Sprint</h2>
+            <p class="muted">Define a measurable objective — progress updates automatically from live telemetry with zero manual entry.</p>
+          </div>
+          <button id="quickSprintBtn" class="plan-sprint-btn" type="button">⚡ Quick Sprint (+5% EXP)</button>
+        </div>
+
+        <div id="sprintMapContext" class="context-banner hidden"></div>
+
+        <div class="templates-section">
+          <span class="label">TEMPLATES</span>
+          <div id="sprintTemplatesRow" class="templates-row"></div>
+        </div>
+
+        <div class="session-form-grid">
+          <label class="filter-field">
+            <span class="label">TARGET TYPE</span>
+            <select id="sprintTypeSelect">
+              <option value="exp_pct">EXP Target (+%)</option>
+              <option value="time">Active Time (minutes)</option>
+              <option value="kills">Kill Target (total or specific mob)</option>
+              <option value="mesos">Mesos Target (gross + NPC)</option>
+              <option value="drops">Drop Count Target</option>
+              <option value="mix">Smart Mix (Compound Goal)</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span id="sprintValueLabel" class="label">TARGET VALUE (% EXP)</span>
+            <input id="sprintValueInput" type="number" min="1" max="100000000" value="5" />
+          </label>
+          <label id="sprintMobField" class="filter-field hidden">
+            <span class="label">SPECIFIC MONSTER (OPTIONAL)</span>
+            <select id="sprintMobSelect">
+              <option value="">Any monster</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span class="label">PACE</span>
+            <select id="sprintPaceSelect">
+              <option value="relaxed">Relaxed</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="ambitious">Ambitious</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="sprintMixRow" class="session-mix-grid hidden">
+          <label class="filter-field">
+            <span class="label">COMPOUND RULE</span>
+            <select id="sprintCompoundMode">
+              <option value="any">Any of (whichever finishes first)</option>
+              <option value="all">All of (complete both)</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span class="label">SECOND GOAL</span>
+            <select id="sprintSecondaryType">
+              <option value="exp_pct">EXP Target (+%)</option>
+              <option value="kills">Kill Target</option>
+              <option value="mesos">Mesos Target</option>
+              <option value="drops">Drops Target</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span class="label">SECOND VALUE</span>
+            <input id="sprintSecondaryValue" type="number" min="1" max="100000000" value="3" />
+          </label>
+        </div>
+
+        <div class="calc-preview">
+          <div id="sprintCalcEstimate" class="calc-summary"></div>
+          <button id="startSprintBtn" class="start-sprint-btn" type="button">▶ Start Target Sprint</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- TAB 3: CHALLENGES BOARD & LIBRARY -->
+    <div id="viewChallenges" class="tab-view hidden">
+      <section class="card">
+        <div class="history-header">
+          <div>
+            <h2>Active Challenges (Max 3)</h2>
+            <p class="muted">Auto-tracked from live packets. Reroll any slot anytime — no daily streak penalties.</p>
+          </div>
+          <div class="top-actions">
+            <span id="weeklySprintsTag" class="mini-tag">0 sprints this week</span>
+            <button id="rerollAllChallengesBtn" class="pill wake" type="button">↻ Reroll Board</button>
+          </div>
+        </div>
+        <div id="challengesActiveList" class="ch-grid"></div>
+      </section>
+
+      <section class="card">
+        <div class="history-header">
+          <div>
+            <h2>Challenge Library</h2>
+            <p class="muted">Every challenge below is 100% measurable from your live MapleStory telemetry.</p>
+          </div>
+          <select id="challengeCategoryFilter" class="lib-filter-select" aria-label="Filter Challenge Library">
+            <option value="All">All Categories</option>
+            <option value="EXP">EXP</option>
+            <option value="Combat">Combat</option>
+            <option value="Economy">Economy</option>
+            <option value="Loot">Loot</option>
+            <option value="Exploration">Exploration</option>
+            <option value="Consistency">Consistency</option>
+            <option value="Special">Special</option>
+          </select>
+        </div>
+        <div id="challengesLibraryList" class="lib-list"></div>
+      </section>
     </div>
 
     <!-- TAB 2: BEST MAPS BY LEVEL & JOB GUIDE -->
@@ -278,6 +432,6 @@
       </section>
     </div>
   </main>
-  <script type="module" src="js/main.js?v=20261121a"></script>
+  <script type="module" src="js/main.js?v=20261121b"></script>
 </body>
 </html>
